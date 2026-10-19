@@ -12,7 +12,7 @@ class PremiumLiveCaptionApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Premium Live Caption Player',
+      title: 'Live Caption Player',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

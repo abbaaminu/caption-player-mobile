@@ -1,6 +1,6 @@
 {
-    "name": "Premium Live Caption Player",
-    "short_name": "Live Captions",
+    "name": "Live Caption Player",
+    "short_name": "Live Caption Player",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#212121",

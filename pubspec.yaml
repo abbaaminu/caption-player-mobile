@@ -1,5 +1,5 @@
 name: premium_live_caption
-description: A video player with live speech recognition captions for phones and web.
+description: Live Caption Player for phones and web.
 version: 1.0.0+1
 
 environment:
@@ -13,6 +13,7 @@ dependencies:
   video_player: ^2.8.2
   speech_to_text: ^7.4.0
   flutter_secure_storage: ^11.2.0
+  shared_preferences: ^2.5.6
   app_links: ^6.3.2 # Replaced discontinued uni_links
   permission_handler: ^11.3.1
   url_launcher: ^6.1.12

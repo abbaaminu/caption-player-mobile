@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config/app_config.dart';
+import '../models/license_state.dart';
 import '../services/storage_service.dart';
 import '../services/api_service.dart';
 import '../services/speech_service.dart';
@@ -41,6 +42,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isUpdatingSlider = false;
   bool _isLoadingVideo = false;
   bool _speechAvailable = false;
+  bool _isRequestingSpeech = false;
+  bool _microphonePermissionDenied = false;
+  bool _showSpeechRecoveryActions = false;
+  bool _isSavingTrial = false;
   String? _playerError;
 
   Timer? _trialTrackerTimer;
@@ -55,8 +60,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _initAppAndCheckLicense() async {
-    _watchTimeMs = await _storageService.loadSavedTime();
-    final cachedState = await _storageService.loadLicense();
+    late final LicenseState? cachedState;
+    try {
+      _watchTimeMs = await _storageService.loadSavedTime();
+      cachedState = await _storageService.loadLicense();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _watchTimeMs = _maxFreeTimeMs;
+        _showPaywall = true;
+        _showSpeechRecoveryActions = false;
+        _playerError = kIsWeb
+            ? 'Browser storage is unavailable. Allow site data for this '
+                  'website in your browser settings, then reload.'
+            : 'Could not read saved trial or license data: $error';
+      });
+      return;
+    }
 
     if (!mounted) return;
 
@@ -72,44 +92,111 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _initSpeechRecognizer() async {
+    if (_isRequestingSpeech) return;
+    setState(() {
+      _isRequestingSpeech = true;
+      _playerError = null;
+      _microphonePermissionDenied = false;
+      _showSpeechRecoveryActions = false;
+    });
+
     try {
-      if (!kIsWeb) {
-        final status = await Permission.microphone.request();
-        if (!status.isGranted) {
-          if (mounted) {
-            setState(() {
-              _playerError =
-                  'Allow microphone access to generate live captions.';
-            });
-          }
-          return;
-        }
+      if (kIsWeb && !_isSecureWebOrigin(Uri.base)) {
+        _setSpeechError(
+          'Microphone access requires a secure website. Open this app using '
+          'HTTPS or localhost, then allow microphone access in your browser.',
+        );
+        return;
+      }
+
+      if (kIsWeb && !await _speechService.isSupported()) {
+        _setSpeechError(
+          'This browser does not support live speech recognition. Try a '
+          'current version of Chrome or Edge.',
+        );
+        return;
+      }
+
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        _setSpeechError(
+          kIsWeb
+              ? 'Microphone access was blocked. Allow it in this site’s browser '
+                    'permissions, then retry. Use HTTPS or localhost in Chrome or Edge.'
+              : 'Microphone access was denied. Allow it in your device app '
+                    'settings, then retry.',
+          permissionDenied: true,
+        );
+        return;
       }
 
       final available = await _speechService.initSpeech(
         onError: (message) {
-          if (mounted) {
-            setState(() => _playerError = 'Speech recognition error: $message');
-          }
+          _setSpeechError(
+            SpeechService.userFriendlyError(message, isWeb: kIsWeb),
+          );
         },
       );
       if (!mounted) return;
 
       setState(() {
         _speechAvailable = available;
+        _showSpeechRecoveryActions = !available;
         if (!available) {
-          _playerError =
-              'Live speech recognition is unavailable in this browser or device.';
+          _playerError = kIsWeb
+              ? 'Live speech recognition is unavailable. Use a supported '
+                    'browser such as current Chrome or Edge, allow microphone '
+                    'access, and open the app using HTTPS or localhost.'
+              : 'Live speech recognition is unavailable on this device.';
         } else {
           _playerError = null;
         }
       });
     } catch (error) {
-      if (mounted) {
-        setState(
-          () => _playerError = 'Could not start speech recognition: $error',
+      _setSpeechError(
+        SpeechService.userFriendlyError(error.toString(), isWeb: kIsWeb),
+      );
+    } finally {
+      if (mounted) setState(() => _isRequestingSpeech = false);
+    }
+  }
+
+  bool _isSecureWebOrigin(Uri uri) {
+    if (uri.scheme == 'https') return true;
+    if (uri.scheme != 'http') return false;
+
+    final host = uri.host.toLowerCase().replaceAll(RegExp(r'^\[|\]$'), '');
+    return host == 'localhost' ||
+        host.endsWith('.localhost') ||
+        host == '127.0.0.1' ||
+        host == '::1';
+  }
+
+  void _setSpeechError(String message, {bool permissionDenied = false}) {
+    if (!mounted) return;
+    setState(() {
+      _speechAvailable = false;
+      _microphonePermissionDenied = permissionDenied;
+      _showSpeechRecoveryActions = true;
+      _playerError = message;
+    });
+  }
+
+  Future<void> _openMicrophoneSettings() async {
+    try {
+      if (!await openAppSettings() && mounted) {
+        _setSpeechError(
+          'Could not open app settings. Enable microphone access in your '
+          'device settings, then retry.',
+          permissionDenied: true,
         );
       }
+    } catch (error) {
+      _setSpeechError(
+        'Could not open app settings: $error. Enable microphone access in '
+        'your device settings, then retry.',
+        permissionDenied: true,
+      );
     }
   }
 
@@ -186,12 +273,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       final isValid = await _apiService.verifyLicenseKey(key);
       if (isValid) {
-        await _storageService.saveLicense(key);
+        String? storageMessage;
+        try {
+          await _storageService.saveLicense(key);
+        } catch (error) {
+          storageMessage = kIsWeb
+              ? 'License verified for this session, but browser storage could '
+                    'not save it. Allow site data to keep the activation after reload.'
+              : 'License verified, but could not save it on this device: $error';
+        }
         if (!mounted) return;
         setState(() {
           _isSubscribed = true;
           _showPaywall = false;
-          _paywallStatus = "";
+          _paywallStatus = storageMessage ?? '';
           _captionsText = "License verified. Enjoy unlimited captions!";
         });
       } else {
@@ -221,6 +316,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _isLoadingVideo = true;
       _playerError = null;
+      _showSpeechRecoveryActions = false;
     });
 
     VideoPlayerController? controller;
@@ -250,7 +346,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } catch (error) {
       await controller?.dispose();
       if (mounted) {
-        setState(() => _playerError = 'Could not open this video: $error');
+        setState(() {
+          _playerError = 'Could not open this video: $error';
+          _showSpeechRecoveryActions = false;
+        });
       }
     } finally {
       if (mounted) setState(() => _isLoadingVideo = false);
@@ -265,11 +364,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return _speechService.startListening(
       onResult: _handleSpeechResult,
       onError: (message) {
-        if (mounted) {
-          setState(
-            () => _playerError = 'Could not start live captions: $message',
-          );
-        }
+        _setSpeechError(
+          SpeechService.userFriendlyError(message, isWeb: kIsWeb),
+          permissionDenied:
+              message.toLowerCase().contains('permission') ||
+              message.toLowerCase().contains('not-allowed'),
+        );
       },
     );
   }
@@ -287,12 +387,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
     ) async {
       if (_isSubscribed ||
           _videoController == null ||
-          !_videoController!.value.isPlaying) {
+          !_videoController!.value.isPlaying ||
+          _isSavingTrial) {
         return;
       }
 
       _watchTimeMs += 1000;
-      await _storageService.saveCurrentTime(_watchTimeMs);
+      _isSavingTrial = true;
+      try {
+        await _storageService.saveCurrentTime(_watchTimeMs);
+      } catch (error) {
+        timer.cancel();
+        await _videoController?.pause();
+        await _speechService.stopListening();
+        if (mounted) {
+          setState(() {
+            _showPaywall = true;
+            _showSpeechRecoveryActions = false;
+            _playerError = kIsWeb
+                ? 'Could not save trial time in browser storage. Allow site '
+                      'data for this website before continuing.'
+                : 'Could not save trial time: $error';
+          });
+        }
+        return;
+      } finally {
+        _isSavingTrial = false;
+      }
 
       if (_watchTimeMs >= _maxFreeTimeMs) {
         _videoController?.pause();
@@ -337,7 +458,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return Scaffold(
       backgroundColor: Colors.grey[900],
       appBar: AppBar(
-        title: const Text('Premium Live Caption Player'),
+        title: const Text('Live Caption Player'),
         backgroundColor: Colors.black,
       ),
       body: SafeArea(
@@ -407,16 +528,78 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ],
                   ),
                 ),
+                Container(
+                  margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.blueGrey.shade900,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.info_outline,
+                        color: Colors.lightBlueAccent,
+                        size: 20,
+                      ),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Live captions use sound picked up by your device '
+                          'microphone; they do not directly transcribe the '
+                          'video’s internal audio. Keep playback audible and '
+                          'use speakers close to the microphone.',
+                          style: TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 if (_playerError != null)
-                  Padding(
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 6,
+                      horizontal: 12,
+                      vertical: 8,
                     ),
-                    child: Text(
-                      _playerError!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.orangeAccent),
+                    decoration: BoxDecoration(
+                      color: Colors.deepOrange.shade900,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        Text(
+                          _playerError!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        if (_showSpeechRecoveryActions)
+                          Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: 8,
+                            children: [
+                              TextButton(
+                                onPressed: _isRequestingSpeech
+                                    ? null
+                                    : _initSpeechRecognizer,
+                                child: Text(
+                                  _isRequestingSpeech
+                                      ? 'Requesting microphone...'
+                                      : 'Allow microphone / retry',
+                                ),
+                              ),
+                              if (_microphonePermissionDenied && !kIsWeb)
+                                TextButton(
+                                  onPressed: _openMicrophoneSettings,
+                                  child: const Text('Open app settings'),
+                                ),
+                            ],
+                          ),
+                      ],
                     ),
                   ),
                 CustomSlider(
