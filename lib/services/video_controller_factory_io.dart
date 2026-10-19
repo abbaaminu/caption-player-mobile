@@ -1,0 +1,12 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:video_player/video_player.dart';
+
+Future<VideoPlayerController> createVideoController(PlatformFile file) async {
+  final path = file.path;
+  if (path == null || path.isEmpty) {
+    throw StateError('The selected video does not have a readable file path.');
+  }
+  return VideoPlayerController.file(File(path));
+}
