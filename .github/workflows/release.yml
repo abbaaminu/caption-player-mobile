@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.44.6'
+
+      - name: Enable native assets
+        run: flutter config --enable-native-assets
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test
+
+      - name: Prepare artifact directory
+        run: mkdir -p artifacts
+
+      - name: Configure Android signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "::error title=Android signing not configured::Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD repository secrets before releasing."
+            exit 1
+          fi
+          python3 -c "import base64, os; open('android/app/upload-keystore.jks', 'wb').write(base64.b64decode(os.environ['ANDROID_KEYSTORE_BASE64']))"
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_PASSWORD" "$ANDROID_KEY_ALIAS" > android/key.properties
+
+      - name: Build Android release APK
+        run: flutter build apk --release
+
+      - name: Collect Android artifact
+        run: cp build/app/outputs/flutter-apk/app-release.apk artifacts/live-caption-player-android.apk
+
+      - name: Build web release
+        run: flutter build web --no-wasm-dry-run
+
+      - name: Archive web build
+        run: |
+          cd build/web
+          zip -r ../../artifacts/live-caption-player-web.zip .
+
+      - name: Build unsigned iOS archive
+        run: flutter build ipa --release --no-codesign
+
+      - name: Package unsigned iOS IPA
+        run: |
+          mkdir -p artifacts/ios/Payload
+          cp -R build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app artifacts/ios/Payload/
+          (cd artifacts/ios && zip -qry ../live-caption-player-ios-unsigned.ipa Payload)
+          rm -rf artifacts/ios
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: abbaaminu/caption-player-mobile-release
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: Live Caption Player ${{ github.ref_name }}
+          files: artifacts/*
+

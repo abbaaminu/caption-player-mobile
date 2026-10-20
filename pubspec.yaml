@@ -1,27 +1,33 @@
-name: premium_live_caption
-description: Live Caption Player for phones and web.
+name: live_caption_player
+description: >-
+  Live Caption Player plays local video and audio files while transcribing
+  nearby speech into on-screen live captions. Available on Android, iOS, and
+  the web.
 version: 1.0.0+1
+publish_to: none
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
 
 dependencies:
+  app_links: ^6.3.2
+  cupertino_icons: ^1.0.8
+  file_picker: ^12.2.0
   flutter:
     sdk: flutter
-  file_picker: ^12.2.0
-  http: ^1.6.0
-  video_player: ^2.8.2
-  speech_to_text: ^7.4.0
   flutter_secure_storage: ^11.2.0
-  shared_preferences: ^2.5.6
-  app_links: ^6.3.2 # Replaced discontinued uni_links
+  http: ^1.6.0
   permission_handler: ^11.3.1
+  shared_preferences: ^2.5.6
+  speech_to_text: ^7.4.0
   url_launcher: ^6.1.12
+  video_player: ^2.8.2
+  web: ^1.1.1
 
 dev_dependencies:
+  flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
 
 flutter:
   uses-material-design: true

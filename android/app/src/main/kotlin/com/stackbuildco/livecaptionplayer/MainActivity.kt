@@ -1,4 +1,4 @@
-package com.example.premiumcaption_player
+package com.stackbuildco.livecaptionplayer
 
 import io.flutter.embedding.android.FlutterActivity
 

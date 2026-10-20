@@ -1,181 +1,658 @@
 import 'dart:async';
-import 'package:file_picker/file_picker.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
-import 'package:app_links/app_links.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
 import '../config/app_config.dart';
-import '../models/license_state.dart';
-import '../services/storage_service.dart';
+import '../services/activation_link_service.dart';
 import '../services/api_service.dart';
+import '../services/media_picker_service.dart';
+import '../services/microphone_permission_service.dart';
 import '../services/speech_service.dart';
+import '../services/storage_service.dart';
 import '../services/video_controller_factory.dart';
+import '../theme/app_theme.dart';
+import '../utils/activation_link.dart';
+import '../utils/media_format.dart';
+import '../utils/web_origin.dart';
+import '../widgets/audio_player_card.dart';
+import '../widgets/caption_overlay.dart';
+import '../widgets/empty_player_view.dart';
+import '../widgets/player_controls.dart';
+import '../widgets/player_error_banner.dart';
+import '../widgets/startup_error_view.dart';
 import 'paywall_overlay.dart';
-import '../widgets/custom_slider.dart';
 
 class PlayerScreen extends StatefulWidget {
-  const PlayerScreen({super.key});
+  const PlayerScreen({
+    super.key,
+    this.storageService,
+    this.apiService,
+    this.speechService,
+    this.activationLinkSource,
+    this.microphonePermissions,
+    this.mediaPicker,
+    this.videoControllerFactory,
+  });
+
+  final StorageService? storageService;
+  final ApiService? apiService;
+  final SpeechService? speechService;
+  final ActivationLinkSource? activationLinkSource;
+  final MicrophonePermissionService? microphonePermissions;
+  final MediaPickerService? mediaPicker;
+  final VideoControllerFactory? videoControllerFactory;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  final StorageService _storageService = StorageService();
-  final ApiService _apiService = ApiService();
-  final SpeechService _speechService = SpeechService();
+  late final StorageService _storageService;
+  late final ApiService _apiService;
+  late final SpeechService _speechService;
+  late final ActivationLinkSource _activationLinkSource;
+  late final MicrophonePermissionService _microphonePermissions;
+  late final MediaPickerService _mediaPicker;
+  late final VideoControllerFactory _videoControllerFactory;
+  late final bool _ownsApiService;
+  late final TextEditingController _licenseKeyController;
 
+  StreamSubscription<String>? _activationLinkSubscription;
+  Timer? _trialTimer;
   VideoPlayerController? _videoController;
-  final TextEditingController _keyController = TextEditingController();
 
-  int _watchTimeMs = 0;
-  final int _maxFreeTimeMs = AppConfig.freeTrialDuration.inMilliseconds;
+  bool _isInitializing = true;
+  String? _startupError;
+  String? _startupErrorDetails;
+
   bool _isSubscribed = false;
-
-  String _captionsText = "Open a video file to begin...";
-  String _paywallStatus = "";
   bool _showPaywall = false;
   bool _isActivating = false;
-  bool _isUpdatingSlider = false;
-  bool _isLoadingVideo = false;
+  String _paywallStatus = '';
+
+  double _watchTimeMs = 0;
+  int _lastSavedTrialMs = 0;
+  bool _isSavingTrial = false;
+
+  bool _isLoadingMedia = false;
+  bool _isAudioTrack = false;
+  String? _mediaTitle;
+  String? _playerError;
+  bool _showSpeechRecoveryActions = false;
+  String? _lastVideoError;
+  bool _wasCompleted = false;
+
+  bool _captionsEnabled = false;
   bool _speechAvailable = false;
+  bool _isSpeechListening = false;
   bool _isRequestingSpeech = false;
   bool _microphonePermissionDenied = false;
-  bool _showSpeechRecoveryActions = false;
-  bool _isSavingTrial = false;
-  String? _playerError;
+  String _captionsText = '';
 
-  Timer? _trialTrackerTimer;
-  StreamSubscription? _subLink;
+  double? _dragPositionMs;
 
   @override
   void initState() {
     super.initState();
-    _initAppAndCheckLicense();
-    _initDeepLinking();
-    _initSpeechRecognizer();
+    _storageService = widget.storageService ?? StorageService();
+    _apiService = widget.apiService ?? ApiService();
+    _ownsApiService = widget.apiService == null;
+    _speechService = widget.speechService ?? SpeechService();
+    _activationLinkSource =
+        widget.activationLinkSource ?? AppLinksActivationLinkSource();
+    _microphonePermissions =
+        widget.microphonePermissions ??
+        PermissionHandlerMicrophonePermissionService();
+    _mediaPicker = widget.mediaPicker ?? FilePickerMediaPickerService();
+    _videoControllerFactory =
+        widget.videoControllerFactory ?? createVideoController;
+    _licenseKeyController = TextEditingController();
+
+    unawaited(_initializeApp());
+    _startTrialTracking();
+    _initializeDeepLinking();
   }
 
-  Future<void> _initAppAndCheckLicense() async {
-    late final LicenseState? cachedState;
+  @override
+  void dispose() {
+    _trialTimer?.cancel();
+    unawaited(_activationLinkSubscription?.cancel());
+    _videoController?.removeListener(_handleVideoChanged);
+    unawaited(_videoController?.dispose());
+    unawaited(_stopCaptioning());
+    if (_ownsApiService) {
+      _apiService.close();
+    }
+    _licenseKeyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initializeApp() async {
     try {
-      _watchTimeMs = await _storageService.loadSavedTime();
-      cachedState = await _storageService.loadLicense();
-    } catch (error) {
-      if (!mounted) return;
+      final savedTime = await _storageService.loadSavedTime();
+      final cachedLicense = await _storageService.loadLicense();
+      if (!mounted) {
+        return;
+      }
+      _lastSavedTrialMs = savedTime;
       setState(() {
-        _watchTimeMs = _maxFreeTimeMs;
-        _showPaywall = true;
-        _showSpeechRecoveryActions = false;
-        _playerError = kIsWeb
-            ? 'Browser storage is unavailable. Allow site data for this '
-                  'website in your browser settings, then reload.'
-            : 'Could not read saved trial or license data: $error';
+        _isInitializing = false;
+        _startupError = null;
+        _startupErrorDetails = null;
+        _watchTimeMs = savedTime.toDouble();
+        if (cachedLicense != null && cachedLicense.isValid) {
+          _isSubscribed = true;
+          final key = cachedLicense.key;
+          if (key != null && key.isNotEmpty) {
+            _licenseKeyController.text = key;
+          }
+        } else if (savedTime >= AppConfig.maxFreeTrialMs) {
+          _showPaywall = true;
+        }
+      });
+
+      final cachedKey = cachedLicense?.key;
+      if (cachedLicense != null &&
+          cachedLicense.isValid &&
+          cachedKey != null &&
+          cachedKey.isNotEmpty) {
+        unawaited(_verifyLicense(cachedKey, silent: true));
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isInitializing = false;
+        _startupError = kIsWeb
+            ? 'Could not load your saved session. The browser may be '
+                  'blocking site storage for this app.'
+            : 'Could not load your saved session. Check that the app has '
+                  'free storage space, then try again.';
+        _startupErrorDetails = kDebugMode ? error.toString() : null;
+      });
+    }
+  }
+
+  void _retryStartup() {
+    setState(() {
+      _isInitializing = true;
+      _startupError = null;
+      _startupErrorDetails = null;
+    });
+    unawaited(_initializeApp());
+  }
+
+  void _initializeDeepLinking() {
+    try {
+      _activationLinkSubscription = _activationLinkSource.links.listen(
+        _handleActivationLink,
+        onError: (Object error) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _showPaywall = true;
+            _paywallStatus =
+                'Could not read that activation link. Open the link again.';
+          });
+          unawaited(_pausePlaybackForPaywall());
+          if (kDebugMode) {
+            debugPrint('Activation link stream error: $error');
+          }
+        },
+      );
+      if (!kIsWeb) {
+        unawaited(_handleInitialActivationLink());
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Activation link initialization failed: $error');
+      }
+    }
+  }
+
+  Future<void> _handleInitialActivationLink() async {
+    try {
+      final link = await _activationLinkSource.getInitialLink();
+      if (link != null && link.isNotEmpty) {
+        _handleActivationLink(link);
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Initial activation link failed: $error');
+      }
+    }
+  }
+
+  void _handleActivationLink(String rawLink) {
+    final parsed = parseActivationLink(rawLink);
+    switch (parsed) {
+      case ActivationLinkKey(:final key):
+        setState(() {
+          _licenseKeyController.text = key;
+          _showPaywall = true;
+          _paywallStatus = 'Checking activation key…';
+        });
+        unawaited(_pausePlaybackForPaywall());
+        unawaited(_verifyLicense(key));
+      case ActivationLinkMissingKey():
+        setState(() {
+          _showPaywall = true;
+          _paywallStatus =
+              'That activation link is missing its license key. Paste the '
+              'key from your purchase email instead.';
+        });
+        unawaited(_pausePlaybackForPaywall());
+      case ActivationLinkIgnored():
+        break;
+    }
+  }
+
+  Future<void> _verifyLicense(String key, {bool silent = false}) async {
+    final normalized = key.trim();
+    if (normalized.isEmpty) {
+      if (!silent) {
+        setState(() => _paywallStatus = 'Paste your license key first.');
+      }
+      return;
+    }
+    if (!silent) {
+      setState(() => _isActivating = true);
+    }
+
+    try {
+      final isValid = await _apiService.verifyLicenseKey(normalized);
+      if (!mounted) {
+        return;
+      }
+      if (isValid) {
+        if (silent) {
+          setState(() => _isSubscribed = true);
+          return;
+        }
+        String? storageWarning;
+        try {
+          await _storageService.saveLicense(normalized);
+        } catch (error) {
+          storageWarning = kIsWeb
+              ? 'Activated for this session, but the license could not be '
+                    'saved. Allow site storage before your next launch.'
+              : 'Activated for this session, but the license could not be '
+                    'saved. Free some storage before your next launch.';
+          if (kDebugMode) {
+            debugPrint('License persistence failed: $error');
+          }
+        }
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _isSubscribed = true;
+          _showPaywall = false;
+          _paywallStatus = '';
+          _licenseKeyController.clear();
+          _playerError = storageWarning;
+          _showSpeechRecoveryActions = false;
+        });
+      } else if (silent) {
+        try {
+          await _storageService.clearLicense();
+        } catch (error) {
+          if (kDebugMode) {
+            debugPrint('License cache cleanup failed: $error');
+          }
+        }
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _isSubscribed = false;
+          _showPaywall = _watchTimeMs >= AppConfig.maxFreeTrialMs;
+        });
+      } else {
+        _licenseKeyController.clear();
+        setState(() {
+          _paywallStatus =
+              'That activation key is not valid. Check the key and try again.';
+        });
+      }
+    } on LicenseVerificationException catch (error) {
+      if (mounted && !silent) {
+        setState(() => _paywallStatus = error.message);
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('License verification failed: $error');
+      }
+      if (mounted && !silent) {
+        setState(() {
+          _paywallStatus =
+              'Could not verify the license right now. Check your connection '
+              'and try again.';
+        });
+      }
+    } finally {
+      if (!silent && mounted) {
+        setState(() => _isActivating = false);
+      }
+    }
+  }
+
+  Future<void> _openPricingPage() async {
+    final uri = Uri.tryParse(AppConfig.pricingUrl);
+    if (uri == null) {
+      setState(() {
+        _paywallStatus =
+            'The pricing page address is not valid. Contact support at '
+            '${AppConfig.supportEmail}.';
       });
       return;
     }
-
-    if (!mounted) return;
-
-    if (cachedState != null && cachedState.isSubscribed) {
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        throw StateError('Pricing page did not open.');
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Pricing page launch failed: $error');
+      }
+      if (!mounted) {
+        return;
+      }
       setState(() {
-        _isSubscribed = true;
+        _paywallStatus =
+            'Could not open the pricing page. Check your connection or '
+            'browser, then try again.';
       });
-      // Silently check in background
-      _verifyLicense(cachedState.key ?? "", silent: true);
-    } else if (!_isSubscribed && _watchTimeMs >= _maxFreeTimeMs) {
-      setState(() => _showPaywall = true);
     }
   }
 
-  Future<void> _initSpeechRecognizer() async {
-    if (_isRequestingSpeech) return;
+  Future<void> _pausePlaybackForPaywall() async {
+    try {
+      await _videoController?.pause();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Could not pause for paywall: $error');
+      }
+    }
+    await _stopCaptioning();
+    if (mounted) {
+      setState(() => _isSpeechListening = false);
+    }
+  }
+
+  Future<void> _lockForPaywall() async {
+    await _pausePlaybackForPaywall();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _showPaywall = true;
+      _paywallStatus = '';
+      _captionsText = '';
+    });
+  }
+
+  void _startTrialTracking() {
+    _trialTimer?.cancel();
+    _trialTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (timer) => unawaited(_onTrialTick(timer)),
+    );
+  }
+
+  Future<void> _onTrialTick(Timer timer) async {
+    if (!mounted) {
+      timer.cancel();
+      return;
+    }
+    final controller = _videoController;
+    if (_isSubscribed ||
+        _showPaywall ||
+        _isSavingTrial ||
+        controller == null ||
+        !controller.value.isPlaying) {
+      return;
+    }
+    if (_watchTimeMs >= AppConfig.maxFreeTrialMs) {
+      await _lockForPaywall();
+      return;
+    }
+
+    setState(() {
+      _watchTimeMs = (_watchTimeMs + Duration.millisecondsPerSecond).clamp(
+        0,
+        AppConfig.maxFreeTrialMs.toDouble(),
+      );
+    });
+
+    final shouldPersist =
+        _watchTimeMs - _lastSavedTrialMs >=
+            AppConfig.trialSaveInterval.inMilliseconds ||
+        _watchTimeMs >= AppConfig.maxFreeTrialMs;
+    if (!shouldPersist) {
+      return;
+    }
+
+    _isSavingTrial = true;
+    try {
+      await _storageService.saveCurrentTime(_watchTimeMs.round());
+      _lastSavedTrialMs = _watchTimeMs.round();
+    } catch (error) {
+      timer.cancel();
+      if (kDebugMode) {
+        debugPrint('Trial progress persistence failed: $error');
+      }
+      await _videoController?.pause();
+      await _stopCaptioning();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _showPaywall = true;
+        _playerError =
+            'Your trial progress could not be saved, so playback was paused. '
+            'Free some storage and restart the app to continue.';
+        _showSpeechRecoveryActions = false;
+        _isSpeechListening = false;
+      });
+      return;
+    } finally {
+      _isSavingTrial = false;
+    }
+
+    if (_watchTimeMs >= AppConfig.maxFreeTrialMs) {
+      await _lockForPaywall();
+    }
+  }
+
+  String get _trialLabel {
+    if (_startupError != null) {
+      return 'Storage unavailable';
+    }
+    if (_isSubscribed) {
+      return 'Activated · unlimited captions';
+    }
+    if (_isInitializing) {
+      return 'Starting up…';
+    }
+    final remainingMs = AppConfig.maxFreeTrialMs - _watchTimeMs;
+    final minutes = (remainingMs / Duration.millisecondsPerMinute).ceil();
+    final bounded = minutes.clamp(0, AppConfig.freeTrialDuration.inMinutes);
+    return 'Free trial · $bounded min left';
+  }
+
+  Future<void> _toggleCaptions() async {
+    if (_captionsEnabled) {
+      setState(() {
+        _captionsEnabled = false;
+        _captionsText = '';
+        _isSpeechListening = false;
+        _playerError = null;
+        _showSpeechRecoveryActions = false;
+      });
+      await _stopCaptioning();
+      return;
+    }
+    await _enableCaptions();
+  }
+
+  Future<void> _enableCaptions() async {
+    if (_isRequestingSpeech) {
+      return;
+    }
     setState(() {
       _isRequestingSpeech = true;
-      _playerError = null;
-      _microphonePermissionDenied = false;
       _showSpeechRecoveryActions = false;
+      _microphonePermissionDenied = false;
+      _playerError = null;
     });
 
     try {
-      if (kIsWeb && !_isSecureWebOrigin(Uri.base)) {
+      if (!isSecureWebOrigin(Uri.base)) {
         _setSpeechError(
-          'Microphone access requires a secure website. Open this app using '
-          'HTTPS or localhost, then allow microphone access in your browser.',
+          'Live captions need HTTPS or localhost in a browser. Open this app '
+          'over a secure connection to enable the microphone.',
         );
         return;
       }
 
-      if (kIsWeb && !await _speechService.isSupported()) {
-        _setSpeechError(
-          'This browser does not support live speech recognition. Try a '
-          'current version of Chrome or Edge.',
-        );
-        return;
-      }
-
-      final status = await Permission.microphone.request();
-      if (!status.isGranted) {
-        _setSpeechError(
-          kIsWeb
-              ? 'Microphone access was blocked. Allow it in this site’s browser '
-                    'permissions, then retry. Use HTTPS or localhost in Chrome or Edge.'
-              : 'Microphone access was denied. Allow it in your device app '
-                    'settings, then retry.',
-          permissionDenied: true,
-        );
-        return;
-      }
-
-      final available = await _speechService.initSpeech(
-        onError: (message) {
+      if (!kIsWeb) {
+        final granted = await _microphonePermissions.request();
+        if (!mounted) {
+          return;
+        }
+        if (!granted) {
           _setSpeechError(
-            SpeechService.userFriendlyError(message, isWeb: kIsWeb),
+            'Microphone access is required for live captions. Allow it in '
+            'device settings, then retry.',
+            permissionDenied: true,
           );
-        },
-      );
-      if (!mounted) return;
+          return;
+        }
+      }
+
+      final available =
+          _speechService.isAvailable ||
+          await _speechService.initSpeech(
+            onError: _handleSpeechError,
+            onStatus: _handleSpeechStatus,
+          );
+      if (!mounted) {
+        return;
+      }
+      if (!available) {
+        if (_playerError == null) {
+          _setSpeechError(
+            SpeechService.userFriendlyError(
+              'Speech recognition is not available.',
+              isWeb: kIsWeb,
+            ),
+          );
+        }
+        return;
+      }
 
       setState(() {
-        _speechAvailable = available;
-        _showSpeechRecoveryActions = !available;
-        if (!available) {
-          _playerError = kIsWeb
-              ? 'Live speech recognition is unavailable. Use a supported '
-                    'browser such as current Chrome or Edge, allow microphone '
-                    'access, and open the app using HTTPS or localhost.'
-              : 'Live speech recognition is unavailable on this device.';
-        } else {
-          _playerError = null;
-        }
+        _speechAvailable = true;
+        _captionsEnabled = true;
+        _captionsText = '';
+        _isSpeechListening = _speechService.isListening;
+        _playerError = null;
+        _showSpeechRecoveryActions = false;
       });
+
+      if (_videoController?.value.isPlaying ?? false) {
+        await _startCaptioning();
+      }
     } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Enabling live captions failed: $error');
+      }
       _setSpeechError(
         SpeechService.userFriendlyError(error.toString(), isWeb: kIsWeb),
       );
     } finally {
-      if (mounted) setState(() => _isRequestingSpeech = false);
+      if (mounted) {
+        setState(() => _isRequestingSpeech = false);
+      }
     }
   }
 
-  bool _isSecureWebOrigin(Uri uri) {
-    if (uri.scheme == 'https') return true;
-    if (uri.scheme != 'http') return false;
+  Future<void> _startCaptioning() async {
+    if (!_speechAvailable ||
+        !_captionsEnabled ||
+        _showPaywall ||
+        _speechService.isListening) {
+      return;
+    }
+    await _speechService.startListening(
+      onResult: _handleSpeechResult,
+      onError: _handleSpeechError,
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() => _isSpeechListening = _speechService.isListening);
+  }
 
-    final host = uri.host.toLowerCase().replaceAll(RegExp(r'^\[|\]$'), '');
-    return host == 'localhost' ||
-        host.endsWith('.localhost') ||
-        host == '127.0.0.1' ||
-        host == '::1';
+  Future<void> _stopCaptioning() async {
+    try {
+      await _speechService.stopListening();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Stopping live captions failed: $error');
+      }
+    }
+  }
+
+  void _handleSpeechResult(String spokenText) {
+    final trimmed = spokenText.trim();
+    if (!mounted || trimmed.isEmpty || !_captionsEnabled || _showPaywall) {
+      return;
+    }
+    setState(() => _captionsText = trimmed);
+  }
+
+  void _handleSpeechStatus(String status) {
+    if (!mounted) {
+      return;
+    }
+    final listening = status == 'listening';
+    if (_isSpeechListening != listening) {
+      setState(() => _isSpeechListening = listening);
+    }
+  }
+
+  void _handleSpeechError(String message) {
+    if (!mounted || SpeechService.isSilenceOrAbort(message)) {
+      return;
+    }
+    if (kDebugMode) {
+      debugPrint('Speech recognition error: $message');
+    }
+    _setSpeechError(
+      SpeechService.userFriendlyError(message, isWeb: kIsWeb),
+      permissionDenied: SpeechService.isPermissionError(message),
+    );
   }
 
   void _setSpeechError(String message, {bool permissionDenied = false}) {
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
     setState(() {
       _speechAvailable = false;
+      _captionsEnabled = false;
+      _isSpeechListening = false;
       _microphonePermissionDenied = permissionDenied;
       _showSpeechRecoveryActions = true;
       _playerError = message;
@@ -183,510 +660,502 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _openMicrophoneSettings() async {
-    try {
-      if (!await openAppSettings() && mounted) {
-        _setSpeechError(
-          'Could not open app settings. Enable microphone access in your '
-          'device settings, then retry.',
-          permissionDenied: true,
-        );
-      }
-    } catch (error) {
-      _setSpeechError(
-        'Could not open app settings: $error. Enable microphone access in '
-        'your device settings, then retry.',
-        permissionDenied: true,
-      );
-    }
-  }
-
-  // --- Deep Link Integration (captionplayer://activate?key=XXX) ---
-  final _appLinks = AppLinks();
-
-  void _initDeepLinking() {
-    _subLink = _appLinks.stringLinkStream.listen(
-      _handleDeepLink,
-      onError: (Object error) {
-        if (mounted) {
-          setState(
-            () => _paywallStatus = 'Could not read activation link: $error',
-          );
-        }
-      },
-    );
-    if (!kIsWeb) unawaited(_handleInitialDeepLink());
-  }
-
-  Future<void> _handleInitialDeepLink() async {
-    try {
-      final link = await _appLinks.getInitialLinkString();
-      if (link != null) _handleDeepLink(link);
-    } catch (error) {
-      if (mounted) {
-        setState(
-          () => _paywallStatus = 'Could not read activation link: $error',
-        );
-      }
-    }
-  }
-
-  void _handleDeepLink(String url) {
-    final uri = Uri.tryParse(url);
-    if (uri == null || uri.scheme != 'captionplayer') return;
-
-    final key = uri.queryParameters['key'];
-    if (key != null) {
-      _keyController.text = key;
-      _verifyLicense(key);
-    } else if (mounted) {
-      setState(
-        () => _paywallStatus = 'Activation link is missing its license key.',
-      );
-    }
-  }
-
-  Future<void> _openPricingPage() async {
-    final uri = Uri.parse(AppConfig.pricingUrl);
-    try {
-      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-        throw StateError('No browser could open the pricing page.');
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(
-          () => _paywallStatus = 'Could not open the pricing page: $error',
-        );
-      }
-    }
-  }
-
-  Future<void> _verifyLicense(String key, {bool silent = false}) async {
-    if (key.trim().isEmpty) {
-      if (!silent && mounted) {
-        setState(() => _paywallStatus = "Please paste your license key first.");
-      }
+    if (kIsWeb) {
       return;
     }
-
-    if (!silent && mounted) setState(() => _isActivating = true);
-
     try {
-      final isValid = await _apiService.verifyLicenseKey(key);
-      if (isValid) {
-        String? storageMessage;
-        try {
-          await _storageService.saveLicense(key);
-        } catch (error) {
-          storageMessage = kIsWeb
-              ? 'License verified for this session, but browser storage could '
-                    'not save it. Allow site data to keep the activation after reload.'
-              : 'License verified, but could not save it on this device: $error';
-        }
-        if (!mounted) return;
+      final opened = await _microphonePermissions.openSettings();
+      if (!opened && mounted) {
         setState(() {
-          _isSubscribed = true;
-          _showPaywall = false;
-          _paywallStatus = storageMessage ?? '';
-          _captionsText = "License verified. Enjoy unlimited captions!";
+          _playerError =
+              'Could not open device settings. Open the app settings manually '
+              'and allow microphone access.';
+          _showSpeechRecoveryActions = true;
         });
-      } else {
-        if (silent) {
-          await _storageService.clearLicense();
-          if (!mounted) return;
-          setState(() {
-            _isSubscribed = false;
-            if (_watchTimeMs >= _maxFreeTimeMs) _showPaywall = true;
-          });
-        } else if (mounted) {
-          _keyController.clear();
-          setState(() => _paywallStatus = "Invalid Activation Key. Try again.");
-        }
       }
     } catch (error) {
-      if (mounted) {
-        setState(() => _paywallStatus = 'Could not verify the license: $error');
+      if (kDebugMode) {
+        debugPrint('Opening microphone settings failed: $error');
       }
-    } finally {
-      if (!silent && mounted) setState(() => _isActivating = false);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _playerError =
+            'Could not open device settings. Open the app settings manually '
+            'and allow microphone access.';
+        _showSpeechRecoveryActions = true;
+      });
     }
   }
 
-  Future<void> _loadLocalVideo() async {
-    if (_isLoadingVideo) return;
+  void _dismissPlayerError() {
     setState(() {
-      _isLoadingVideo = true;
       _playerError = null;
       _showSpeechRecoveryActions = false;
     });
+  }
 
-    VideoPlayerController? controller;
+  Future<void> _pickMedia() async {
+    if (_isLoadingMedia || _showPaywall) {
+      return;
+    }
+    setState(() {
+      _isLoadingMedia = true;
+      _playerError = null;
+      _showSpeechRecoveryActions = false;
+      _lastVideoError = null;
+    });
+
+    VideoPlayerController? newController;
     try {
-      final pickedFile = await FilePicker.pickFile(type: FileType.video);
-      if (!mounted || pickedFile == null) return;
-
-      controller = await createVideoController(pickedFile);
-      await controller.initialize();
-      if (!mounted) {
-        await controller.dispose();
+      final file = await _mediaPicker.pickMedia();
+      if (file == null || !mounted) {
         return;
       }
+      newController = await _videoControllerFactory(file);
+      await newController.initialize();
+      if (!mounted) {
+        await newController.dispose();
+        return;
+      }
+      newController.addListener(_handleVideoChanged);
+      await newController.play();
 
-      await controller.play();
       final previousController = _videoController;
       setState(() {
-        _videoController = controller;
-        _captionsText = _speechAvailable
-            ? 'Listening for nearby speech...'
-            : 'Video is playing. Enable speech recognition to see live captions.';
+        _videoController = newController;
+        _isAudioTrack = isAudioMediaExtension(file.extension);
+        _mediaTitle = file.name;
+        _captionsText = '';
+        _wasCompleted = false;
+        _lastVideoError = null;
       });
-      controller.addListener(_handleVideoChanged);
+      previousController?.removeListener(_handleVideoChanged);
       await previousController?.dispose();
-      _startTrialTracking();
-      if (_speechAvailable) _startCaptioning();
-    } catch (error) {
-      await controller?.dispose();
-      if (mounted) {
-        setState(() {
-          _playerError = 'Could not open this video: $error';
-          _showSpeechRecoveryActions = false;
-        });
+
+      if (_captionsEnabled && _speechAvailable) {
+        await _startCaptioning();
       }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Opening media failed: $error');
+      }
+      await newController?.dispose();
+      if (!mounted) {
+        return;
+      }
+      setState(() => _playerError = _mediaErrorMessage(error));
     } finally {
-      if (mounted) setState(() => _isLoadingVideo = false);
+      if (mounted) {
+        setState(() => _isLoadingMedia = false);
+      }
     }
+  }
+
+  String _mediaErrorMessage(Object error) {
+    const fallback =
+        'Could not open that media file. Try a standard MP4 or WebM video, '
+        'or an MP3, M4A, WAV, or OGG audio file.';
+    if (error is UnsupportedError) {
+      return error.message ?? fallback;
+    }
+    if (error is StateError) {
+      return error.message;
+    }
+    return fallback;
   }
 
   void _handleVideoChanged() {
-    if (mounted && !_isUpdatingSlider) setState(() {});
-  }
-
-  Future<void> _startCaptioning() {
-    return _speechService.startListening(
-      onResult: _handleSpeechResult,
-      onError: (message) {
-        _setSpeechError(
-          SpeechService.userFriendlyError(message, isWeb: kIsWeb),
-          permissionDenied:
-              message.toLowerCase().contains('permission') ||
-              message.toLowerCase().contains('not-allowed'),
-        );
-      },
-    );
-  }
-
-  void _handleSpeechResult(String text) {
-    if (mounted && !_showPaywall) {
-      setState(() => _captionsText = text);
+    if (!mounted) {
+      return;
     }
-  }
-
-  void _startTrialTracking() {
-    _trialTrackerTimer?.cancel();
-    _trialTrackerTimer = Timer.periodic(const Duration(seconds: 1), (
-      timer,
-    ) async {
-      if (_isSubscribed ||
-          _videoController == null ||
-          !_videoController!.value.isPlaying ||
-          _isSavingTrial) {
-        return;
-      }
-
-      _watchTimeMs += 1000;
-      _isSavingTrial = true;
-      try {
-        await _storageService.saveCurrentTime(_watchTimeMs);
-      } catch (error) {
-        timer.cancel();
-        await _videoController?.pause();
-        await _speechService.stopListening();
-        if (mounted) {
-          setState(() {
-            _showPaywall = true;
-            _showSpeechRecoveryActions = false;
-            _playerError = kIsWeb
-                ? 'Could not save trial time in browser storage. Allow site '
-                      'data for this website before continuing.'
-                : 'Could not save trial time: $error';
-          });
+    final controller = _videoController;
+    if (controller == null) {
+      return;
+    }
+    final value = controller.value;
+    final error = value.errorDescription;
+    if (error != null && error.isNotEmpty) {
+      if (error != _lastVideoError) {
+        _lastVideoError = error;
+        if (kDebugMode) {
+          debugPrint('Video playback error: $error');
         }
-        return;
-      } finally {
-        _isSavingTrial = false;
+        unawaited(_stopCaptioning());
+        setState(() {
+          _playerError =
+              'Playback stopped unexpectedly. Reopen the file or choose a '
+              'different format.';
+          _captionsText = '';
+          _isSpeechListening = false;
+          _showSpeechRecoveryActions = false;
+        });
       }
+      return;
+    }
+    _lastVideoError = null;
 
-      if (_watchTimeMs >= _maxFreeTimeMs) {
-        _videoController?.pause();
-        await _speechService.stopListening();
-        if (mounted) setState(() => _showPaywall = true);
-        _trialTrackerTimer?.cancel();
-      }
-    });
-  }
-
-  Future<void> _togglePlay() async {
-    if (_showPaywall) return;
-    if (_videoController == null) return;
-
-    if (_videoController!.value.isPlaying) {
-      await _videoController!.pause();
-      await _speechService.stopListening();
-    } else {
-      await _videoController!.play();
-      if (_speechAvailable) {
-        await _startCaptioning();
-      }
+    if (value.isCompleted && !_wasCompleted) {
+      _wasCompleted = true;
+      unawaited(_stopCaptioning());
+      setState(() => _isSpeechListening = false);
+      return;
+    }
+    if (!value.isCompleted) {
+      _wasCompleted = false;
+    }
+    if (_dragPositionMs == null) {
+      setState(() {});
     }
   }
 
-  @override
-  void dispose() {
-    _videoController?.dispose();
-    _keyController.dispose();
-    _apiService.close();
-    _trialTrackerTimer?.cancel();
-    _subLink?.cancel();
-    unawaited(_speechService.stopListening());
-    super.dispose();
+  Future<void> _togglePlayback() async {
+    final controller = _videoController;
+    if (controller == null || _showPaywall) {
+      return;
+    }
+    try {
+      if (controller.value.isPlaying) {
+        await controller.pause();
+        await _stopCaptioning();
+        if (mounted) {
+          setState(() => _isSpeechListening = false);
+        }
+      } else {
+        if (controller.value.isCompleted) {
+          await controller.seekTo(Duration.zero);
+          _wasCompleted = false;
+        }
+        await controller.play();
+        if (_captionsEnabled && _speechAvailable) {
+          await _startCaptioning();
+        }
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Playback control failed: $error');
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _playerError =
+            'Playback could not be controlled. Try reopening the '
+            'media file.';
+      });
+    }
+  }
+
+  void _handleSeekChanged(double value) {
+    setState(() => _dragPositionMs = value);
+  }
+
+  Future<void> _finishSeek(double value) async {
+    await _seekTo(Duration(milliseconds: value.round()));
+    if (mounted) {
+      setState(() => _dragPositionMs = null);
+    }
+  }
+
+  Future<void> _seekBy(Duration offset) async {
+    final position = _videoController?.value.position ?? Duration.zero;
+    await _seekTo(position + offset);
+  }
+
+  Future<void> _seekTo(Duration target) async {
+    final controller = _videoController;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    final duration = controller.value.duration;
+    var clamped = target;
+    if (clamped < Duration.zero) {
+      clamped = Duration.zero;
+    } else if (duration > Duration.zero && clamped > duration) {
+      clamped = duration;
+    }
+    try {
+      await controller.seekTo(clamped);
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Seek failed: $error');
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final position = _videoController?.value.position ?? Duration.zero;
-    final duration = _videoController?.value.duration ?? Duration.zero;
+    final theme = Theme.of(context);
+    final value = _videoController?.value;
+    final hasMedia = value?.isInitialized ?? false;
+    final duration = value?.duration ?? Duration.zero;
+    final displayMs =
+        _dragPositionMs ?? value?.position.inMilliseconds.toDouble() ?? 0;
+    final positionMs = displayMs < 0 ? 0.0 : displayMs;
 
     return Scaffold(
-      backgroundColor: Colors.grey[900],
-      appBar: AppBar(
-        title: const Text('Live Caption Player'),
-        backgroundColor: Colors.black,
-      ),
+      appBar: _buildAppBar(theme),
       body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1000),
-            child: Column(
-              children: [
-                Expanded(
-                  child: Stack(
-                    children: [
-                      Container(
-                        width: double.infinity,
-                        color: Colors.black,
-                        child: Center(
-                          child:
-                              _videoController != null &&
-                                  _videoController!.value.isInitialized
-                              ? AspectRatio(
-                                  aspectRatio:
-                                      _videoController!.value.aspectRatio,
-                                  child: VideoPlayer(_videoController!),
-                                )
-                              : const Text(
-                                  'Choose a video to start',
-                                  style: TextStyle(color: Colors.white70),
-                                ),
-                        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1100),
+                child: Column(
+                  children: [
+                    Expanded(child: _buildMediaArea()),
+                    if (!_isInitializing && _startupError == null)
+                      PlayerControls(
+                        position: Duration(milliseconds: positionMs.round()),
+                        duration: duration,
+                        hasMedia: hasMedia,
+                        isPlaying: value?.isPlaying ?? false,
+                        isLoading: _isLoadingMedia,
+                        captionsEnabled: _captionsEnabled,
+                        isRequestingCaptions: _isRequestingSpeech,
+                        enabled: !_showPaywall,
+                        onPickMedia: () => unawaited(_pickMedia()),
+                        onBack10: () =>
+                            unawaited(_seekBy(const Duration(seconds: -10))),
+                        onForward10: () =>
+                            unawaited(_seekBy(const Duration(seconds: 10))),
+                        onTogglePlay: () => unawaited(_togglePlayback()),
+                        onSeekChanged: _handleSeekChanged,
+                        onSeekEnd: (seekValue) =>
+                            unawaited(_finishSeek(seekValue)),
+                        onToggleCaptions: () => unawaited(_toggleCaptions()),
                       ),
-                      if (!_showPaywall)
-                        Positioned(
-                          bottom: 20,
-                          left: 16,
-                          right: 16,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.78),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              _captionsText,
-                              maxLines: 4,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.yellow,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      if (_isLoadingVideo)
-                        const Center(child: CircularProgressIndicator()),
-                      if (_showPaywall)
-                        PaywallOverlay(
-                          controller: _keyController,
-                          statusMessage: _paywallStatus,
-                          isLoading: _isActivating,
-                          onOpenPricing: _openPricingPage,
-                          onActivate: () => _verifyLicense(_keyController.text),
-                        ),
-                    ],
-                  ),
+                  ],
                 ),
-                Container(
-                  margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 9,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.blueGrey.shade900,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        Icons.info_outline,
-                        color: Colors.lightBlueAccent,
-                        size: 20,
-                      ),
-                      SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Live captions use sound picked up by your device '
-                          'microphone; they do not directly transcribe the '
-                          'video’s internal audio. Keep playback audible and '
-                          'use speakers close to the microphone.',
-                          style: TextStyle(color: Colors.white70, fontSize: 12),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (_playerError != null)
-                  Container(
-                    margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.deepOrange.shade900,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Column(
-                      children: [
-                        Text(
-                          _playerError!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        if (_showSpeechRecoveryActions)
-                          Wrap(
-                            alignment: WrapAlignment.center,
-                            spacing: 8,
-                            children: [
-                              TextButton(
-                                onPressed: _isRequestingSpeech
-                                    ? null
-                                    : _initSpeechRecognizer,
-                                child: Text(
-                                  _isRequestingSpeech
-                                      ? 'Requesting microphone...'
-                                      : 'Allow microphone / retry',
-                                ),
-                              ),
-                              if (_microphonePermissionDenied && !kIsWeb)
-                                TextButton(
-                                  onPressed: _openMicrophoneSettings,
-                                  child: const Text('Open app settings'),
-                                ),
-                            ],
-                          ),
-                      ],
-                    ),
-                  ),
-                CustomSlider(
-                  value: position.inMilliseconds.toDouble(),
-                  max: duration.inMilliseconds.toDouble(),
-                  onChanged: (val) {
-                    _isUpdatingSlider = true;
-                    setState(() {});
-                  },
-                  onChangeEnd: (val) {
-                    _isUpdatingSlider = false;
-                    _videoController?.seekTo(
-                      Duration(milliseconds: val.toInt()),
-                    );
-                  },
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 4,
-                  ),
-                  child: Wrap(
-                    alignment: WrapAlignment.center,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    children: [
-                      IconButton(
-                        tooltip: 'Choose a video',
-                        icon: const Icon(Icons.video_file, color: Colors.white),
-                        onPressed: _isLoadingVideo ? null : _loadLocalVideo,
-                      ),
-                      IconButton(
-                        tooltip: 'Back 10 seconds',
-                        icon: const Icon(Icons.replay_10, color: Colors.white),
-                        onPressed: _videoController == null
-                            ? null
-                            : () {
-                                final target =
-                                    position - const Duration(seconds: 10);
-                                _videoController?.seekTo(
-                                  target < Duration.zero
-                                      ? Duration.zero
-                                      : target,
-                                );
-                              },
-                      ),
-                      IconButton(
-                        tooltip: 'Play or pause',
-                        icon: Icon(
-                          _videoController?.value.isPlaying == true
-                              ? Icons.pause
-                              : Icons.play_arrow,
-                          color: Colors.white,
-                          size: 32,
-                        ),
-                        onPressed: _videoController == null
-                            ? null
-                            : _togglePlay,
-                      ),
-                      IconButton(
-                        tooltip: 'Forward 10 seconds',
-                        icon: const Icon(Icons.forward_10, color: Colors.white),
-                        onPressed: _videoController == null
-                            ? null
-                            : () {
-                                final target =
-                                    position + const Duration(seconds: 10);
-                                _videoController?.seekTo(
-                                  target > duration ? duration : target,
-                                );
-                              },
-                      ),
-                      Text(
-                        '${position.inMinutes}:${(position.inSeconds % 60).toString().padLeft(2, '0')} / ${duration.inMinutes}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
+            if (_showPaywall)
+              Positioned.fill(
+                child: PaywallOverlay(
+                  controller: _licenseKeyController,
+                  statusMessage: _paywallStatus,
+                  isLoading: _isActivating,
+                  onActivate: () =>
+                      unawaited(_verifyLicense(_licenseKeyController.text)),
+                  onOpenPricing: () => unawaited(_openPricingPage()),
+                ),
+              ),
+          ],
         ),
       ),
     );
+  }
+
+  PreferredSizeWidget _buildAppBar(ThemeData theme) {
+    final trialColor = _startupError != null
+        ? theme.colorScheme.error
+        : _isSubscribed
+        ? AppTheme.accent
+        : Colors.white60;
+
+    return AppBar(
+      automaticallyImplyLeading: false,
+      titleSpacing: 16,
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            AppConfig.appName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleMedium?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            _trialLabel,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(color: trialColor),
+          ),
+        ],
+      ),
+      actions: [
+        if (_isSpeechListening)
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: Center(
+              child: Semantics(
+                liveRegion: true,
+                label: 'Live captions are active',
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.error.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                      color: theme.colorScheme.error.withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.error,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'LIVE',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.error,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(width: 8),
+      ],
+    );
+  }
+
+  Widget _buildMediaArea() {
+    final controller = _videoController;
+    final value = controller?.value;
+    final isReady = controller != null && value != null && value.isInitialized;
+    final Widget content;
+
+    if (_isInitializing) {
+      content = const Center(
+        child: CircularProgressIndicator(semanticsLabel: 'Loading player'),
+      );
+    } else if (_startupError != null) {
+      content = StartupErrorView(
+        message: _startupError!,
+        details: _startupErrorDetails,
+        onRetry: _retryStartup,
+      );
+    } else if (controller != null && value != null && value.isInitialized) {
+      if (_isAudioTrack) {
+        final title = _mediaTitle;
+        content = SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: AudioPlayerCard(
+              title: title == null || title.isEmpty ? 'Audio track' : title,
+              isPlaying: value.isPlaying,
+              duration: value.duration,
+            ),
+          ),
+        );
+      } else {
+        final aspectRatio = value.aspectRatio;
+        final safeAspectRatio = aspectRatio.isFinite && aspectRatio > 0
+            ? aspectRatio
+            : 16 / 9;
+        content = Center(
+          child: AspectRatio(
+            aspectRatio: safeAspectRatio,
+            child: VideoPlayer(controller),
+          ),
+        );
+      }
+    } else {
+      content = EmptyPlayerView(
+        onChooseMedia: () => unawaited(_pickMedia()),
+        isLoading: _isLoadingMedia,
+      );
+    }
+
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          content,
+          if (_isLoadingMedia && isReady)
+            Positioned.fill(
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: 0.55),
+                child: const Center(
+                  child: CircularProgressIndicator(
+                    semanticsLabel: 'Opening media',
+                  ),
+                ),
+              ),
+            ),
+          if (_playerError != null && _startupError == null && !_showPaywall)
+            Positioned(
+              top: 12,
+              left: 12,
+              right: 12,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: PlayerErrorBanner(
+                    message: _playerError!,
+                    isBusy: _isRequestingSpeech,
+                    onRetry: _showSpeechRecoveryActions
+                        ? () => unawaited(_enableCaptions())
+                        : null,
+                    onOpenSettings:
+                        _showSpeechRecoveryActions &&
+                            _microphonePermissionDenied &&
+                            !kIsWeb
+                        ? () => unawaited(_openMicrophoneSettings())
+                        : null,
+                    onDismiss: _dismissPlayerError,
+                  ),
+                ),
+              ),
+            ),
+          if (isReady && !_showPaywall && !_isLoadingMedia)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 16,
+              child: Center(child: CaptionOverlay(text: _captionText)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String get _captionText {
+    if (!_captionsEnabled) {
+      return 'Live captions are off. Tap the microphone in the controls to '
+          'start.';
+    }
+    if (_isRequestingSpeech) {
+      return 'Requesting microphone access…';
+    }
+    if (!_speechAvailable) {
+      return 'Live captions are unavailable. Tap the microphone to retry.';
+    }
+    if (_isSpeechListening) {
+      return _captionsText.isNotEmpty
+          ? _captionsText
+          : 'Listening for nearby speech…';
+    }
+    if (_videoController?.value.isPlaying != true) {
+      return _captionsText.isNotEmpty
+          ? _captionsText
+          : 'Playback paused. Press play and captions will resume.';
+    }
+    return _captionsText.isNotEmpty
+        ? _captionsText
+        : 'Live captions are ready.';
   }
 }

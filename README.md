@@ -72,7 +72,68 @@ instead of invoking the secure-storage plugin. Browser storage is scoped to
 the deployed origin and is not encrypted; users can clear it in browser
 settings.
 
-iOS builds require macOS and Xcode.
+iOS builds require macOS and Xcode. The release workflow packages an unsigned
+iOS IPA as `live-caption-player-ios-unsigned.ipa`. Sign it with an Apple
+distribution certificate and provisioning profile before installing or
+distributing it.
+
+The Android application ID and iOS bundle identifier are
+`com.stackbuildco.livecaptionplayer`. Keep these identifiers stable after the
+first store release, because stores use them to match updates to an existing
+app.
+
+### Android release signing
+
+For a distributable APK, create an upload keystore outside version control and
+add `android/key.properties`:
+
+```properties
+storePassword=your-store-password
+keyPassword=your-key-password
+keyAlias=upload
+storeFile=upload-keystore.jks
+```
+
+Place the keystore at `android/app/upload-keystore.jks`. Both the keystore and
+`key.properties` are git-ignored. Without them, release builds fall back to the
+debug signing key and must not be published to a store.
+
+The release workflow reads the same values from the
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and
+`ANDROID_KEY_PASSWORD` repository secrets. All four are required; the release
+job fails before publishing if any is missing, so a debug-signed APK cannot be
+released by accident.
+
+## Tests
+
+```sh
+flutter analyze
+flutter test
+```
+
+The tests cover the licensing client, speech error mapping, storage,
+activation-link parsing, media formats, web-origin checks, and the player
+screen's startup, paywall, activation, and deep-link flows.
+
+## Release workflow
+
+Pushing a tag that starts with `v` (for example `v1.0.0`) runs
+`.github/workflows/release.yml`. The workflow pins Flutter 3.44.6, verifies
+formatting, analysis, and tests, then builds and publishes:
+
+- `live-caption-player-android.apk` (signed with the release keystore)
+- `live-caption-player-web.zip`
+- `live-caption-player-ios-unsigned.ipa`
+
+The assets are attached to a release in the
+`abbaaminu/caption-player-mobile-release` repository. The workflow requires the
+four Android signing secrets above plus `RELEASE_TOKEN`, a token with
+`contents: write` access to that release repository. The default
+`GITHUB_TOKEN` cannot publish releases to a different repository.
+
+Set `version:` in `pubspec.yaml` before tagging so the Android version name and
+build number, and the iOS short version and bundle version, match the release
+tag.
 
 ## Live caption limitations
 
