@@ -62,6 +62,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   StreamSubscription<String>? _activationLinkSubscription;
   Timer? _trialTimer;
+  Timer? _speechRestartTimer;
   VideoPlayerController? _videoController;
 
   bool _isInitializing = true;
@@ -119,6 +120,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _trialTimer?.cancel();
+    _speechRestartTimer?.cancel();
     unawaited(_activationLinkSubscription?.cancel());
     _videoController?.removeListener(_handleVideoChanged);
     unawaited(_videoController?.dispose());
@@ -490,21 +492,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return 'Free trial · $bounded min left';
   }
 
-  Future<void> _toggleCaptions() async {
-    if (_captionsEnabled) {
-      setState(() {
-        _captionsEnabled = false;
-        _captionsText = '';
-        _isSpeechListening = false;
-        _playerError = null;
-        _showSpeechRecoveryActions = false;
-      });
-      await _stopCaptioning();
-      return;
-    }
-    await _enableCaptions();
-  }
-
   Future<void> _enableCaptions() async {
     if (_isRequestingSpeech) {
       return;
@@ -519,8 +506,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       if (!isSecureWebOrigin(Uri.base)) {
         _setSpeechError(
-          'Live captions need HTTPS or localhost in a browser. Open this app '
-          'over a secure connection to enable the microphone.',
+          'Live speech recognition needs HTTPS or localhost in a browser. '
+          'Open this app over a secure connection, then retry.',
         );
         return;
       }
@@ -532,8 +519,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
         if (!granted) {
           _setSpeechError(
-            'Microphone access is required for live captions. Allow it in '
-            'device settings, then retry.',
+            'Speech recognition permission was denied. Update the app '
+            'permissions in device settings, then retry.',
             permissionDenied: true,
           );
           return;
@@ -605,6 +592,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _stopCaptioning() async {
+    _speechRestartTimer?.cancel();
+    _speechRestartTimer = null;
     try {
       await _speechService.stopListening();
     } catch (error) {
@@ -629,6 +618,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final listening = status == 'listening';
     if (_isSpeechListening != listening) {
       setState(() => _isSpeechListening = listening);
+    }
+    if (!listening) {
+      _speechRestartTimer?.cancel();
+      _speechRestartTimer = Timer(const Duration(milliseconds: 300), () {
+        _speechRestartTimer = null;
+        if (mounted &&
+            _captionsEnabled &&
+            _speechAvailable &&
+            _videoController?.value.isPlaying == true) {
+          unawaited(_startCaptioning());
+        }
+      });
     }
   }
 
@@ -669,7 +670,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() {
           _playerError =
               'Could not open device settings. Open the app settings manually '
-              'and allow microphone access.';
+              'and update speech recognition permissions.';
           _showSpeechRecoveryActions = true;
         });
       }
@@ -683,7 +684,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {
         _playerError =
             'Could not open device settings. Open the app settings manually '
-            'and allow microphone access.';
+            'and update speech recognition permissions.';
         _showSpeechRecoveryActions = true;
       });
     }
@@ -736,6 +737,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       if (_captionsEnabled && _speechAvailable) {
         await _startCaptioning();
+      } else {
+        await _enableCaptions();
       }
     } catch (error) {
       if (kDebugMode) {
@@ -830,6 +833,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await controller.play();
         if (_captionsEnabled && _speechAvailable) {
           await _startCaptioning();
+        } else {
+          await _enableCaptions();
         }
       }
     } catch (error) {
@@ -884,6 +889,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  Future<void> _setVolume(double volume) async {
+    final controller = _videoController;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    try {
+      await controller.setVolume(volume.clamp(0.0, 1.0));
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Volume control failed: $error');
+      }
+      if (mounted) {
+        setState(() => _playerError = 'Volume could not be changed.');
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -910,11 +932,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       PlayerControls(
                         position: Duration(milliseconds: positionMs.round()),
                         duration: duration,
+                        volume: value?.volume ?? 1,
                         hasMedia: hasMedia,
                         isPlaying: value?.isPlaying ?? false,
                         isLoading: _isLoadingMedia,
-                        captionsEnabled: _captionsEnabled,
-                        isRequestingCaptions: _isRequestingSpeech,
                         enabled: !_showPaywall,
                         onPickMedia: () => unawaited(_pickMedia()),
                         onBack10: () =>
@@ -922,10 +943,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         onForward10: () =>
                             unawaited(_seekBy(const Duration(seconds: 10))),
                         onTogglePlay: () => unawaited(_togglePlayback()),
+                        onVolumeChanged: (volume) =>
+                            unawaited(_setVolume(volume)),
                         onSeekChanged: _handleSeekChanged,
                         onSeekEnd: (seekValue) =>
                             unawaited(_finishSeek(seekValue)),
-                        onToggleCaptions: () => unawaited(_toggleCaptions()),
                       ),
                   ],
                 ),
@@ -1121,41 +1143,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
               ),
             ),
-          if (isReady && !_showPaywall && !_isLoadingMedia)
+          if (isReady &&
+              !_showPaywall &&
+              !_isLoadingMedia &&
+              _captionsText.isNotEmpty)
             Positioned(
               left: 16,
               right: 16,
               bottom: 16,
-              child: Center(child: CaptionOverlay(text: _captionText)),
+              child: Center(child: CaptionOverlay(text: _captionsText)),
             ),
         ],
       ),
     );
-  }
-
-  String get _captionText {
-    if (!_captionsEnabled) {
-      return 'Live captions are off. Tap the microphone in the controls to '
-          'start.';
-    }
-    if (_isRequestingSpeech) {
-      return 'Requesting microphone access…';
-    }
-    if (!_speechAvailable) {
-      return 'Live captions are unavailable. Tap the microphone to retry.';
-    }
-    if (_isSpeechListening) {
-      return _captionsText.isNotEmpty
-          ? _captionsText
-          : 'Listening for nearby speech…';
-    }
-    if (_videoController?.value.isPlaying != true) {
-      return _captionsText.isNotEmpty
-          ? _captionsText
-          : 'Playback paused. Press play and captions will resume.';
-    }
-    return _captionsText.isNotEmpty
-        ? _captionsText
-        : 'Live captions are ready.';
   }
 }

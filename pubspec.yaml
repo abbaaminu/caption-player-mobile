@@ -1,8 +1,7 @@
 name: live_caption_player
 description: >-
-  Live Caption Player plays local video and audio files while transcribing
-  nearby speech into on-screen live captions. Available on Android, iOS, and
-  the web.
+  Live Caption Player plays local video and audio files while generating
+  on-screen live captions. Available on Android, iOS, and the web.
 version: 1.0.0+1
 publish_to: none
 
@@ -25,9 +24,20 @@ dependencies:
   web: ^1.1.1
 
 dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
   flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
+
+flutter_launcher_icons:
+  image_path: "assets/app_icon.png"
+  android: true
+  ios: true
+  image_path_ios: "assets/app_icon.png"
+  image_path_android: "assets/app_icon.png"
+  web:
+    generate: true
+    image_path: "assets/app_icon.png"
 
 flutter:
   uses-material-design: true

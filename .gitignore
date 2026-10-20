@@ -48,3 +48,5 @@ app.*.map.json
 android/key.properties
 android/app/*.jks
 android/app/*.keystore
+*.jks
+/live-caption-release-key.jks

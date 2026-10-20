@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../theme/app_theme.dart';
 import '../utils/media_format.dart';
-import 'microphone_notice.dart';
 
 /// First-run surface before the user chooses a media file.
 class EmptyPlayerView extends StatelessWidget {
@@ -78,8 +77,6 @@ class EmptyPlayerView extends StatelessWidget {
                   letterSpacing: 0.4,
                 ),
               ),
-              const SizedBox(height: 28),
-              const MicrophoneNotice(),
             ],
           ),
         ),

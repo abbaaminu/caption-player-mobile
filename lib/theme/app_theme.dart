@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 
 /// Centralized dark theme so widgets do not hard-code colors.
 abstract final class AppTheme {
-  static const background = Color(0xFF0C0D10);
-  static const surface = Color(0xFF17181D);
-  static const surfaceRaised = Color(0xFF21232B);
+  static const background = Color(0xFF000000);
+  static const surface = Color(0xFF000000);
+  static const surfaceRaised = Color(0xFF111111);
   static const accent = Color(0xFFFFC247);
 
   static final ThemeData dark = _buildDarkTheme();

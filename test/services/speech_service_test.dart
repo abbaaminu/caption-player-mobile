@@ -3,24 +3,25 @@ import 'package:live_caption_player/services/speech_service.dart';
 
 void main() {
   group('SpeechService.userFriendlyError', () {
-    test('explains browser microphone permission denial', () {
+    test('explains browser speech-recognition permission denial', () {
       final message = SpeechService.userFriendlyError(
         'not-allowed',
         isWeb: true,
       );
 
-      expect(message, contains('browser blocked microphone access'));
+      expect(message, contains('browser blocked speech recognition'));
       expect(message, contains('HTTPS or localhost'));
       expect(message, contains('Chrome or Edge'));
     });
 
-    test('explains device microphone permission denial', () {
+    test('explains device speech-recognition permission denial', () {
       final message = SpeechService.userFriendlyError(
         'service-not-allowed',
         isWeb: false,
       );
 
       expect(message, contains('device settings'));
+      expect(message, isNot(contains('microphone')));
       expect(message, isNot(contains('browser')));
     });
 
@@ -33,13 +34,13 @@ void main() {
       expect(message, contains('current version of Chrome or Edge'));
     });
 
-    test('explains missing microphone hardware', () {
+    test('explains unavailable audio input', () {
       final message = SpeechService.userFriendlyError(
         'audio-capture',
         isWeb: false,
       );
 
-      expect(message, contains('No microphone is available'));
+      expect(message, contains('could not access audio input'));
     });
 
     test('explains network and busy failures', () {
@@ -59,8 +60,7 @@ void main() {
         isWeb: false,
       );
 
-      expect(message, contains('Check microphone and'));
-      expect(message, contains('permissions'));
+      expect(message, contains('Check app permissions'));
     });
   });
 

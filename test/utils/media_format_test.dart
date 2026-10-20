@@ -48,9 +48,9 @@ void main() {
 
   group('formatPlaybackDuration', () {
     test('formats minutes and seconds', () {
-      expect(formatPlaybackDuration(Duration.zero), '0:00');
-      expect(formatPlaybackDuration(const Duration(seconds: 5)), '0:05');
-      expect(formatPlaybackDuration(const Duration(seconds: 65)), '1:05');
+      expect(formatPlaybackDuration(Duration.zero), '00:00');
+      expect(formatPlaybackDuration(const Duration(seconds: 5)), '00:05');
+      expect(formatPlaybackDuration(const Duration(seconds: 65)), '01:05');
       expect(
         formatPlaybackDuration(const Duration(minutes: 59, seconds: 59)),
         '59:59',
@@ -68,7 +68,7 @@ void main() {
     });
 
     test('clamps negative durations', () {
-      expect(formatPlaybackDuration(const Duration(seconds: -4)), '0:00');
+      expect(formatPlaybackDuration(const Duration(seconds: -4)), '00:00');
     });
   });
 }

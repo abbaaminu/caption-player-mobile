@@ -53,7 +53,7 @@
 		</dict>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>This app requires microphone access to listen to audio and generate real-time live captions.</string>
+	<string>Microphone access enables platform speech recognition for live captions while media plays.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>This app requires speech recognition access to convert audio into translated live text captions.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

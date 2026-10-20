@@ -1,7 +1,7 @@
 # Live Caption Player
 
-A Flutter video player for Android, iOS, and the web. Select a video, play it,
-and display live captions generated from microphone speech recognition.
+A Flutter media player for Android, iOS, and the web. Select a video or audio
+file, play it, and display live captions while playback runs.
 
 ## Supported platforms
 
@@ -137,10 +137,9 @@ tag.
 
 ## Live caption limitations
 
-Captions use ambient sound picked up by the microphone while a video plays; the
-app does not directly transcribe internal video audio. Keep playback audible
-and use speakers near the microphone. Allow microphone access on your device
-or in the browser's site settings. Web speech recognition needs HTTPS or
-localhost and a supported browser such as current Chrome or Edge. The web
-version loads the chosen video into browser memory, so very large files may
-require substantial memory.
+The Flutter client currently uses the platform speech-recognition service while
+media plays; it does not yet decode the selected file's internal audio track
+into PCM for transcription. Recognition availability and permissions depend on
+the platform. Web speech recognition needs HTTPS or localhost and a supported
+browser such as current Chrome or Edge. The web version loads the chosen video
+into browser memory, so very large files may require substantial memory.

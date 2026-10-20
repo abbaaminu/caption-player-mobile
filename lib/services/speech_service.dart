@@ -9,6 +9,7 @@ class SpeechService {
   final stt.SpeechToText _speech;
   bool _isAvailable = false;
   bool _isListening = false;
+  bool _isStarting = false;
 
   bool get isAvailable => _isAvailable;
   bool get isListening => _isListening;
@@ -40,17 +41,17 @@ class SpeechService {
         normalized.contains('permission') ||
         normalized.contains('service-not-allowed')) {
       return isWeb
-          ? 'The browser blocked microphone access. Allow microphone access '
-                'for this site in browser settings, then retry. Web speech needs '
+          ? 'The browser blocked speech recognition. Allow it for this site '
+                'in browser settings, then retry. Web speech needs '
                 'HTTPS or localhost and a supported browser such as Chrome or Edge.'
-          : 'Microphone or speech-recognition access was denied. Allow both '
-                'permissions in device settings, then retry.';
+          : 'Speech-recognition permission was denied. Update app permissions '
+                'in device settings, then retry.';
     }
     if (normalized.contains('audio-capture') ||
         normalized.contains('no microphone') ||
         normalized.contains('audio capture')) {
-      return 'No microphone is available. Connect or enable a microphone, '
-          'allow access, and retry.';
+      return 'Speech recognition could not access audio input. Check app '
+          'permissions and retry.';
     }
     if (normalized.contains('language-not-supported') ||
         normalized.contains('language_not_supported')) {
@@ -74,10 +75,10 @@ class SpeechService {
           'retry.';
     }
     return isWeb
-        ? 'Live speech recognition could not start. Allow microphone access, '
+        ? 'Live speech recognition could not start. Allow speech recognition, '
               'use HTTPS or localhost, and try a supported browser such as Chrome or Edge.'
-        : 'Live speech recognition could not start. Check microphone and '
-              'speech-recognition permissions, then retry.';
+        : 'Live speech recognition could not start. Check app permissions, '
+              'then retry.';
   }
 
   /// Silence and explicit stops are normal and must not surface as errors.
@@ -108,10 +109,11 @@ class SpeechService {
       onError('Speech recognition is not available.');
       return;
     }
-    if (_isListening) {
+    if (_isListening || _isStarting) {
       return;
     }
 
+    _isStarting = true;
     try {
       await _speech.listen(
         onResult: (result) {
@@ -127,10 +129,12 @@ class SpeechService {
           partialResults: true,
         ),
       );
-      _isListening = true;
+      _isListening = _speech.isListening;
     } catch (error) {
       _isListening = false;
       onError(error.toString());
+    } finally {
+      _isStarting = false;
     }
   }
 

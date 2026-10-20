@@ -17,29 +17,21 @@ class CaptionOverlay extends StatelessWidget {
           label: 'Live captions',
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.78),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(12),
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               child: Text(
                 text,
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: Color(0xFFFFFF00),
                   fontSize: 19,
                   height: 1.35,
-                  fontWeight: FontWeight.w600,
-                  shadows: [
-                    Shadow(
-                      color: Colors.black,
-                      blurRadius: 4,
-                      offset: Offset(0, 1),
-                    ),
-                  ],
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ),

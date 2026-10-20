@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Non-blocking error card with optional microphone-recovery actions.
+/// Non-blocking error card with optional speech-recognition recovery actions.
 class PlayerErrorBanner extends StatelessWidget {
   const PlayerErrorBanner({
     super.key,
@@ -87,8 +87,8 @@ class PlayerErrorBanner extends StatelessWidget {
                                 ),
                                 child: Text(
                                   isBusy
-                                      ? 'Requesting microphone…'
-                                      : 'Retry microphone',
+                                      ? 'Starting captions…'
+                                      : 'Retry captions',
                                 ),
                               ),
                             if (onOpenSettings != null)

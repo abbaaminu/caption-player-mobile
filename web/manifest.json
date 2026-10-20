@@ -3,9 +3,9 @@
     "short_name": "Live Caption Player",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#212121",
-    "theme_color": "#212121",
-    "description": "Play videos and generate live speech captions on your phone or in a web browser.",
+    "background_color": "#000000",
+    "theme_color": "#000000",
+    "description": "Play local video and audio files with live captions on mobile and web.",
     "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
