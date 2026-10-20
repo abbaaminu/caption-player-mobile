@@ -50,3 +50,6 @@ android/app/*.jks
 android/app/*.keystore
 *.jks
 /live-caption-release-key.jks
+
+# Vosk's iOS XCFramework is downloaded by `dart run vosk_flutter_service install -t ios`
+third_party/vosk_flutter_service/ios/Frameworks/

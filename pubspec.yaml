@@ -11,16 +11,21 @@ environment:
 dependencies:
   app_links: ^6.3.2
   cupertino_icons: ^1.0.8
+  ffmpeg_kit_flutter_new_audio: ^2.5.7
   file_picker: ^12.2.0
   flutter:
     sdk: flutter
   flutter_secure_storage: ^11.2.0
   http: ^1.6.0
-  permission_handler: ^11.3.1
+  path: ^1.9.0
+  path_provider: ^2.1.2
   shared_preferences: ^2.5.6
-  speech_to_text: ^7.4.0
   url_launcher: ^6.1.12
   video_player: ^2.8.2
+  # Local fork of 0.1.2 with a broken upstream web plugin entry removed.
+  # See third_party/vosk_flutter_service/README.md.
+  vosk_flutter_service:
+    path: third_party/vosk_flutter_service
   web: ^1.1.1
 
 dev_dependencies:

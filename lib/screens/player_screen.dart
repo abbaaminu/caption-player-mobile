@@ -9,14 +9,13 @@ import '../config/app_config.dart';
 import '../services/activation_link_service.dart';
 import '../services/api_service.dart';
 import '../services/media_picker_service.dart';
-import '../services/microphone_permission_service.dart';
+import '../services/speech_backend.dart';
 import '../services/speech_service.dart';
 import '../services/storage_service.dart';
 import '../services/video_controller_factory.dart';
 import '../theme/app_theme.dart';
 import '../utils/activation_link.dart';
 import '../utils/media_format.dart';
-import '../utils/web_origin.dart';
 import '../widgets/audio_player_card.dart';
 import '../widgets/caption_overlay.dart';
 import '../widgets/empty_player_view.dart';
@@ -32,7 +31,6 @@ class PlayerScreen extends StatefulWidget {
     this.apiService,
     this.speechService,
     this.activationLinkSource,
-    this.microphonePermissions,
     this.mediaPicker,
     this.videoControllerFactory,
   });
@@ -41,7 +39,6 @@ class PlayerScreen extends StatefulWidget {
   final ApiService? apiService;
   final SpeechService? speechService;
   final ActivationLinkSource? activationLinkSource;
-  final MicrophonePermissionService? microphonePermissions;
   final MediaPickerService? mediaPicker;
   final VideoControllerFactory? videoControllerFactory;
 
@@ -54,15 +51,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   late final ApiService _apiService;
   late final SpeechService _speechService;
   late final ActivationLinkSource _activationLinkSource;
-  late final MicrophonePermissionService _microphonePermissions;
   late final MediaPickerService _mediaPicker;
   late final VideoControllerFactory _videoControllerFactory;
   late final bool _ownsApiService;
+  late final bool _ownsSpeechService;
   late final TextEditingController _licenseKeyController;
 
   StreamSubscription<String>? _activationLinkSubscription;
   Timer? _trialTimer;
-  Timer? _speechRestartTimer;
   VideoPlayerController? _videoController;
 
   bool _isInitializing = true;
@@ -81,16 +77,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isLoadingMedia = false;
   bool _isAudioTrack = false;
   String? _mediaTitle;
+  String? _mediaPath;
   String? _playerError;
-  bool _showSpeechRecoveryActions = false;
+  bool _showCaptionRecoveryActions = false;
   String? _lastVideoError;
   bool _wasCompleted = false;
 
   bool _captionsEnabled = false;
-  bool _speechAvailable = false;
-  bool _isSpeechListening = false;
-  bool _isRequestingSpeech = false;
-  bool _microphonePermissionDenied = false;
+  bool _captionsReady = false;
+  bool _isTranscribing = false;
+  bool _isPreparingCaptions = false;
+  String _captionStatus = '';
   String _captionsText = '';
 
   double? _dragPositionMs;
@@ -102,11 +99,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _apiService = widget.apiService ?? ApiService();
     _ownsApiService = widget.apiService == null;
     _speechService = widget.speechService ?? SpeechService();
+    _ownsSpeechService = widget.speechService == null;
     _activationLinkSource =
         widget.activationLinkSource ?? AppLinksActivationLinkSource();
-    _microphonePermissions =
-        widget.microphonePermissions ??
-        PermissionHandlerMicrophonePermissionService();
     _mediaPicker = widget.mediaPicker ?? FilePickerMediaPickerService();
     _videoControllerFactory =
         widget.videoControllerFactory ?? createVideoController;
@@ -120,11 +115,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _trialTimer?.cancel();
-    _speechRestartTimer?.cancel();
     unawaited(_activationLinkSubscription?.cancel());
     _videoController?.removeListener(_handleVideoChanged);
     unawaited(_videoController?.dispose());
-    unawaited(_stopCaptioning());
+    unawaited(_disposeSpeechService());
     if (_ownsApiService) {
       _apiService.close();
     }
@@ -298,7 +292,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _paywallStatus = '';
           _licenseKeyController.clear();
           _playerError = storageWarning;
-          _showSpeechRecoveryActions = false;
+          _showCaptionRecoveryActions = false;
         });
       } else if (silent) {
         try {
@@ -387,7 +381,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     await _stopCaptioning();
     if (mounted) {
-      setState(() => _isSpeechListening = false);
+      setState(() => _isTranscribing = false);
     }
   }
 
@@ -463,8 +457,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _playerError =
             'Your trial progress could not be saved, so playback was paused. '
             'Free some storage and restart the app to continue.';
-        _showSpeechRecoveryActions = false;
-        _isSpeechListening = false;
+        _showCaptionRecoveryActions = false;
+        _isTranscribing = false;
       });
       return;
     } finally {
@@ -493,207 +487,167 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _enableCaptions() async {
-    if (_isRequestingSpeech) {
+    if (_isPreparingCaptions) {
       return;
     }
+    if (!_speechService.isSupported) {
+      _setCaptionError(
+        const UnsupportedSpeechPlatformException().userMessage,
+        canRetry: false,
+      );
+      return;
+    }
+
     setState(() {
-      _isRequestingSpeech = true;
-      _showSpeechRecoveryActions = false;
-      _microphonePermissionDenied = false;
+      _isPreparingCaptions = true;
+      _showCaptionRecoveryActions = false;
       _playerError = null;
     });
 
     try {
-      if (!isSecureWebOrigin(Uri.base)) {
-        _setSpeechError(
-          'Live speech recognition needs HTTPS or localhost in a browser. '
-          'Open this app over a secure connection, then retry.',
-        );
-        return;
-      }
-
-      if (!kIsWeb) {
-        final granted = await _microphonePermissions.request();
-        if (!mounted) {
-          return;
-        }
-        if (!granted) {
-          _setSpeechError(
-            'Speech recognition permission was denied. Update the app '
-            'permissions in device settings, then retry.',
-            permissionDenied: true,
-          );
-          return;
-        }
-      }
-
-      final available =
-          _speechService.isAvailable ||
-          await _speechService.initSpeech(
-            onError: _handleSpeechError,
-            onStatus: _handleSpeechStatus,
-          );
+      final available = await _speechService.initialize(
+        onError: (message) => _setCaptionError(message),
+        onStatus: _handleSpeechStatus,
+      );
       if (!mounted) {
         return;
       }
       if (!available) {
         if (_playerError == null) {
-          _setSpeechError(
-            SpeechService.userFriendlyError(
-              'Speech recognition is not available.',
-              isWeb: kIsWeb,
-            ),
+          _setCaptionError(
+            const SpeechRecognitionException(
+              cause: 'The speech backend did not initialize.',
+            ).userMessage,
           );
         }
         return;
       }
 
       setState(() {
-        _speechAvailable = true;
+        _captionsReady = true;
         _captionsEnabled = true;
-        _captionsText = '';
-        _isSpeechListening = _speechService.isListening;
         _playerError = null;
-        _showSpeechRecoveryActions = false;
+        _showCaptionRecoveryActions = false;
       });
 
-      if (_videoController?.value.isPlaying ?? false) {
+      if (_videoController?.value.isInitialized ?? false) {
         await _startCaptioning();
       }
     } catch (error) {
       if (kDebugMode) {
-        debugPrint('Enabling live captions failed: $error');
+        debugPrint('Enabling on-device captions failed: $error');
       }
-      _setSpeechError(
-        SpeechService.userFriendlyError(error.toString(), isWeb: kIsWeb),
-      );
+      _setCaptionError(SpeechService.userFriendlyError(error, isWeb: kIsWeb));
     } finally {
       if (mounted) {
-        setState(() => _isRequestingSpeech = false);
+        setState(() => _isPreparingCaptions = false);
       }
     }
   }
 
   Future<void> _startCaptioning() async {
-    if (!_speechAvailable ||
+    final controller = _videoController;
+    final path = _mediaPath;
+    if (!_captionsReady ||
         !_captionsEnabled ||
         _showPaywall ||
-        _speechService.isListening) {
+        controller == null ||
+        !controller.value.isInitialized ||
+        path == null ||
+        path.isEmpty ||
+        _speechService.isActive) {
       return;
     }
-    await _speechService.startListening(
-      onResult: _handleSpeechResult,
-      onError: _handleSpeechError,
+
+    setState(() {
+      _isTranscribing = true;
+      _captionStatus = SpeechService.statusMessage(
+        SpeechStatus.extractingAudio,
+      );
+    });
+    await _speechService.startTranscription(
+      mediaPath: path,
+      position: () => _videoController?.value.position ?? Duration.zero,
+      onResult: _handleCaptionText,
+      onError: _handleCaptionError,
+      onStatus: _handleSpeechStatus,
     );
-    if (!mounted) {
-      return;
-    }
-    setState(() => _isSpeechListening = _speechService.isListening);
   }
 
   Future<void> _stopCaptioning() async {
-    _speechRestartTimer?.cancel();
-    _speechRestartTimer = null;
     try {
-      await _speechService.stopListening();
+      await _speechService.stop();
     } catch (error) {
       if (kDebugMode) {
-        debugPrint('Stopping live captions failed: $error');
+        debugPrint('Stopping on-device captions failed: $error');
       }
     }
-  }
-
-  void _handleSpeechResult(String spokenText) {
-    final trimmed = spokenText.trim();
-    if (!mounted || trimmed.isEmpty || !_captionsEnabled || _showPaywall) {
-      return;
-    }
-    setState(() => _captionsText = trimmed);
-  }
-
-  void _handleSpeechStatus(String status) {
-    if (!mounted) {
-      return;
-    }
-    final listening = status == 'listening';
-    if (_isSpeechListening != listening) {
-      setState(() => _isSpeechListening = listening);
-    }
-    if (!listening) {
-      _speechRestartTimer?.cancel();
-      _speechRestartTimer = Timer(const Duration(milliseconds: 300), () {
-        _speechRestartTimer = null;
-        if (mounted &&
-            _captionsEnabled &&
-            _speechAvailable &&
-            _videoController?.value.isPlaying == true) {
-          unawaited(_startCaptioning());
-        }
+    if (mounted) {
+      setState(() {
+        _isTranscribing = false;
+        _captionStatus = '';
       });
     }
   }
 
-  void _handleSpeechError(String message) {
-    if (!mounted || SpeechService.isSilenceOrAbort(message)) {
-      return;
+  Future<void> _disposeSpeechService() async {
+    try {
+      if (_ownsSpeechService) {
+        await _speechService.dispose();
+      } else {
+        await _speechService.stop();
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Disposing the speech service failed: $error');
+      }
     }
-    if (kDebugMode) {
-      debugPrint('Speech recognition error: $message');
-    }
-    _setSpeechError(
-      SpeechService.userFriendlyError(message, isWeb: kIsWeb),
-      permissionDenied: SpeechService.isPermissionError(message),
-    );
   }
 
-  void _setSpeechError(String message, {bool permissionDenied = false}) {
+  void _handleCaptionText(String text) {
+    if (!mounted || !_captionsEnabled || _showPaywall) {
+      return;
+    }
+    setState(() => _captionsText = text.trim());
+  }
+
+  void _handleSpeechStatus(SpeechStatus status) {
     if (!mounted) {
       return;
     }
     setState(() {
-      _speechAvailable = false;
-      _captionsEnabled = false;
-      _isSpeechListening = false;
-      _microphonePermissionDenied = permissionDenied;
-      _showSpeechRecoveryActions = true;
-      _playerError = message;
+      _captionStatus = SpeechService.statusMessage(status);
+      if (status == SpeechStatus.transcribing) {
+        _isTranscribing = true;
+      }
     });
   }
 
-  Future<void> _openMicrophoneSettings() async {
-    if (kIsWeb) {
+  void _handleCaptionError(String message) {
+    if (kDebugMode) {
+      debugPrint('On-device caption error: $message');
+    }
+    _setCaptionError(message);
+  }
+
+  void _setCaptionError(String message, {bool canRetry = true}) {
+    if (!mounted) {
       return;
     }
-    try {
-      final opened = await _microphonePermissions.openSettings();
-      if (!opened && mounted) {
-        setState(() {
-          _playerError =
-              'Could not open device settings. Open the app settings manually '
-              'and update speech recognition permissions.';
-          _showSpeechRecoveryActions = true;
-        });
-      }
-    } catch (error) {
-      if (kDebugMode) {
-        debugPrint('Opening microphone settings failed: $error');
-      }
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _playerError =
-            'Could not open device settings. Open the app settings manually '
-            'and update speech recognition permissions.';
-        _showSpeechRecoveryActions = true;
-      });
-    }
+    setState(() {
+      _captionsReady = false;
+      _captionsEnabled = false;
+      _isTranscribing = false;
+      _captionStatus = '';
+      _showCaptionRecoveryActions = canRetry;
+      _playerError = message;
+    });
   }
 
   void _dismissPlayerError() {
     setState(() {
       _playerError = null;
-      _showSpeechRecoveryActions = false;
+      _showCaptionRecoveryActions = false;
     });
   }
 
@@ -704,7 +658,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _isLoadingMedia = true;
       _playerError = null;
-      _showSpeechRecoveryActions = false;
+      _showCaptionRecoveryActions = false;
       _lastVideoError = null;
     });
 
@@ -714,6 +668,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (file == null || !mounted) {
         return;
       }
+      await _stopCaptioning();
       newController = await _videoControllerFactory(file);
       await newController.initialize();
       if (!mounted) {
@@ -728,14 +683,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _videoController = newController;
         _isAudioTrack = isAudioMediaExtension(file.extension);
         _mediaTitle = file.name;
+        _mediaPath = file.path;
         _captionsText = '';
+        _captionStatus = '';
         _wasCompleted = false;
         _lastVideoError = null;
       });
       previousController?.removeListener(_handleVideoChanged);
       await previousController?.dispose();
 
-      if (_captionsEnabled && _speechAvailable) {
+      if (_captionsEnabled && _captionsReady) {
         await _startCaptioning();
       } else {
         await _enableCaptions();
@@ -791,8 +748,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
               'Playback stopped unexpectedly. Reopen the file or choose a '
               'different format.';
           _captionsText = '';
-          _isSpeechListening = false;
-          _showSpeechRecoveryActions = false;
+          _isTranscribing = false;
+          _showCaptionRecoveryActions = false;
         });
       }
       return;
@@ -802,7 +759,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (value.isCompleted && !_wasCompleted) {
       _wasCompleted = true;
       unawaited(_stopCaptioning());
-      setState(() => _isSpeechListening = false);
+      setState(() => _isTranscribing = false);
       return;
     }
     if (!value.isCompleted) {
@@ -821,17 +778,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       if (controller.value.isPlaying) {
         await controller.pause();
-        await _stopCaptioning();
-        if (mounted) {
-          setState(() => _isSpeechListening = false);
-        }
+        // Keep the recognizer alive so resuming continues from the same audio.
       } else {
         if (controller.value.isCompleted) {
           await controller.seekTo(Duration.zero);
           _wasCompleted = false;
         }
         await controller.play();
-        if (_captionsEnabled && _speechAvailable) {
+        if (_captionsEnabled && _captionsReady) {
           await _startCaptioning();
         } else {
           await _enableCaptions();
@@ -882,6 +836,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     try {
       await controller.seekTo(clamped);
+      _speechService.seek(clamped);
     } catch (error) {
       if (kDebugMode) {
         debugPrint('Seek failed: $error');
@@ -1003,23 +958,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ],
       ),
       actions: [
-        if (_isSpeechListening)
+        if (_isTranscribing || _isPreparingCaptions)
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: Center(
               child: Semantics(
                 liveRegion: true,
-                label: 'Live captions are active',
+                label: _captionStatus.isEmpty
+                    ? (_isTranscribing
+                          ? 'On-device captions are active'
+                          : 'Preparing on-device captions')
+                    : _captionStatus,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.error.withValues(alpha: 0.16),
+                    color: AppTheme.accent.withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(999),
                     border: Border.all(
-                      color: theme.colorScheme.error.withValues(alpha: 0.45),
+                      color: AppTheme.accent.withValues(alpha: 0.45),
                     ),
                   ),
                   child: Row(
@@ -1028,16 +987,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       Container(
                         width: 6,
                         height: 6,
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.error,
+                        decoration: const BoxDecoration(
+                          color: AppTheme.accent,
                           shape: BoxShape.circle,
                         ),
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        'LIVE',
+                        _isTranscribing ? 'ON-DEVICE' : 'PREPARING',
                         style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.error,
+                          color: AppTheme.accent,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 1,
                         ),
@@ -1128,15 +1087,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   constraints: const BoxConstraints(maxWidth: 760),
                   child: PlayerErrorBanner(
                     message: _playerError!,
-                    isBusy: _isRequestingSpeech,
-                    onRetry: _showSpeechRecoveryActions
+                    isBusy: _isPreparingCaptions,
+                    onRetry: _showCaptionRecoveryActions
                         ? () => unawaited(_enableCaptions())
-                        : null,
-                    onOpenSettings:
-                        _showSpeechRecoveryActions &&
-                            _microphonePermissionDenied &&
-                            !kIsWeb
-                        ? () => unawaited(_openMicrophoneSettings())
                         : null,
                     onDismiss: _dismissPlayerError,
                   ),

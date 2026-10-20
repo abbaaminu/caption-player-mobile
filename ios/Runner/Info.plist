@@ -52,10 +52,6 @@
 			</array>
 		</dict>
 	</dict>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Microphone access enables platform speech recognition for live captions while media plays.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>This app requires speech recognition access to convert audio into translated live text captions.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

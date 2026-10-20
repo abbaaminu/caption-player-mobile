@@ -56,6 +56,12 @@ android {
                 } else {
                     signingConfigs.getByName("debug")
                 }
+            // Vosk reaches its native library through JNA. Keep these rules
+            // ready for builds that enable R8 shrinking.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

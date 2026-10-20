@@ -1,152 +1,426 @@
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'dart:async';
 
-/// Thin wrapper around `speech_to_text` that keeps UI code free of plugin
-/// details and exposes predictable listening state.
+import 'speech_backend.dart';
+import 'speech_backend_stub.dart'
+    if (dart.library.io) 'speech_backend_io.dart'
+    as platform;
+
+/// Coordinates playback position, FFmpeg extraction, and Vosk recognition.
+///
+/// Audio is read from the extracted WAV file only up to the position the
+/// player has actually reached, so captions stay aligned with playback.
 class SpeechService {
-  SpeechService({stt.SpeechToText? speech})
-    : _speech = speech ?? stt.SpeechToText();
+  SpeechService({SpeechBackend? backend})
+    : _backend = backend ?? platform.createSpeechBackend();
 
-  final stt.SpeechToText _speech;
-  bool _isAvailable = false;
-  bool _isListening = false;
-  bool _isStarting = false;
+  static const Duration _pollInterval = Duration(milliseconds: 80);
+  static const Duration _seekThreshold = Duration(milliseconds: 1500);
+  static const Duration _captionLatency = Duration(milliseconds: 200);
+  static const Duration _minimumChunk = Duration(milliseconds: 250);
+  static const Duration _maximumChunk = Duration(seconds: 1);
 
-  bool get isAvailable => _isAvailable;
-  bool get isListening => _isListening;
+  final SpeechBackend _backend;
 
-  Future<bool> isSupported() => _speech.hasPermission;
+  bool _initialized = false;
+  bool _active = false;
+  bool _disposed = false;
+  bool _flushOnStop = false;
+  int _generation = 0;
+  int _epoch = 0;
 
-  Future<bool> initSpeech({
+  Future<void>? _pumpFuture;
+  Completer<void>? _wake;
+  Duration _nextPosition = Duration.zero;
+  bool _resetPending = false;
+  String _finalText = '';
+  String _partialText = '';
+  void Function(String text)? _displayCallback;
+
+  bool get isSupported => _backend.isSupported;
+  bool get isInitialized => _initialized;
+  bool get isActive => _active;
+
+  Future<bool> initialize({
     required void Function(String) onError,
-    void Function(String status)? onStatus,
+    void Function(SpeechStatus status)? onStatus,
   }) async {
-    _isAvailable = await _speech.initialize(
-      onError: (error) {
-        _isListening = false;
-        onError(error.errorMsg);
-      },
-      onStatus: onStatus == null
-          ? null
-          : (status) {
-              _isListening = status == 'listening';
-              onStatus(status);
-            },
+    if (_disposed) {
+      return false;
+    }
+    if (!_backend.isSupported) {
+      onError(const UnsupportedSpeechPlatformException().userMessage);
+      return false;
+    }
+    if (_initialized) {
+      return true;
+    }
+
+    try {
+      _initialized = await _backend.initialize(
+        onStatus: (status) {
+          if (!_disposed) {
+            onStatus?.call(status);
+          }
+        },
+      );
+      if (!_initialized) {
+        onError(
+          const SpeechModelException(
+            cause: 'Speech backend did not initialize.',
+          ).userMessage,
+        );
+      }
+      return _initialized;
+    } catch (error) {
+      _initialized = false;
+      onError(userFriendlyError(error));
+      return false;
+    }
+  }
+
+  /// Starts a new file-audio transcription session.
+  ///
+  /// [position] is read repeatedly so no player-specific types leak into the
+  /// service. Seeking is detected from a large position jump and also through
+  /// an explicit [seek] call.
+  Future<void> startTranscription({
+    required String mediaPath,
+    required Duration Function() position,
+    required void Function(String text) onResult,
+    required void Function(String message) onError,
+    required void Function(SpeechStatus status) onStatus,
+  }) async {
+    if (_disposed) {
+      return;
+    }
+    if (!_initialized || !_backend.isSupported) {
+      onError(const UnsupportedSpeechPlatformException().userMessage);
+      return;
+    }
+
+    await _stopCurrent(flush: false);
+    if (_disposed) {
+      return;
+    }
+
+    _epoch += 1;
+    _generation += 1;
+    _active = true;
+    _resetPending = false;
+    _finalText = '';
+    _partialText = '';
+    _displayCallback = onResult;
+    _nextPosition = _safePosition(position);
+    onResult('');
+
+    _pumpFuture = _run(
+      generation: _generation,
+      epoch: _epoch,
+      mediaPath: mediaPath,
+      position: position,
+      onResult: onResult,
+      onError: onError,
+      onStatus: onStatus,
     );
-    return _isAvailable;
   }
 
-  static String userFriendlyError(String message, {required bool isWeb}) {
-    final normalized = message.toLowerCase();
-    if (normalized.contains('not-allowed') ||
-        normalized.contains('permission') ||
-        normalized.contains('service-not-allowed')) {
-      return isWeb
-          ? 'The browser blocked speech recognition. Allow it for this site '
-                'in browser settings, then retry. Web speech needs '
-                'HTTPS or localhost and a supported browser such as Chrome or Edge.'
-          : 'Speech-recognition permission was denied. Update app permissions '
-                'in device settings, then retry.';
+  /// Stops recognition, flushes the final buffered audio, and clears handlers.
+  Future<void> stop() => _stopCurrent(flush: true);
+
+  /// Clears recognition state immediately after the player seeks.
+  void seek(Duration position) {
+    if (!_active || _disposed) {
+      return;
     }
-    if (normalized.contains('audio-capture') ||
-        normalized.contains('no microphone') ||
-        normalized.contains('audio capture')) {
-      return 'Speech recognition could not access audio input. Check app '
-          'permissions and retry.';
-    }
-    if (normalized.contains('language-not-supported') ||
-        normalized.contains('language_not_supported')) {
-      return 'The selected speech-recognition language is not available on '
-          'this device.';
-    }
-    if (normalized.contains('not supported') ||
-        normalized.contains('speech_not_supported') ||
-        normalized.contains('unsupported')) {
-      return isWeb
-          ? 'This browser does not support live speech recognition. Try a '
-                'current version of Chrome or Edge.'
-          : 'Live speech recognition is not supported on this device.';
-    }
-    if (normalized.contains('network')) {
-      return 'Speech recognition could not connect to its service. Check your '
-          'internet connection and retry.';
-    }
-    if (normalized.contains('busy')) {
-      return 'Speech recognition is already starting. Wait a moment, then '
-          'retry.';
-    }
-    return isWeb
-        ? 'Live speech recognition could not start. Allow speech recognition, '
-              'use HTTPS or localhost, and try a supported browser such as Chrome or Edge.'
-        : 'Live speech recognition could not start. Check app permissions, '
-              'then retry.';
+    _nextPosition = position;
+    _resetPending = true;
+    _finalText = '';
+    _partialText = '';
+    _displayCallback?.call('');
+    _signal();
   }
 
-  /// Silence and explicit stops are normal and must not surface as errors.
-  static bool isSilenceOrAbort(String message) {
-    final normalized = message.toLowerCase();
-    return normalized.contains('no-speech') ||
-        normalized.contains('no_match') ||
-        normalized.contains('aborted') ||
-        normalized.contains('speech_timeout');
+  Future<void> dispose() async {
+    if (_disposed) {
+      return;
+    }
+    _disposed = true;
+    await _stopCurrent(flush: false);
+    await _backend.dispose();
+  }
+
+  static String statusMessage(SpeechStatus status) {
+    return switch (status) {
+      SpeechStatus.downloadingModel =>
+        'Downloading the offline speech model (about 40 MB, first run only)…',
+      SpeechStatus.loadingModel => 'Loading the offline speech model…',
+      SpeechStatus.extractingAudio => "Extracting this file's audio track…",
+      SpeechStatus.transcribing => 'Transcribing file audio on this device…',
+    };
+  }
+
+  static String userFriendlyError(Object error, {bool isWeb = false}) {
+    if (error is SpeechException) {
+      return error.userMessage;
+    }
+    if (isWeb) {
+      return const UnsupportedSpeechPlatformException().userMessage;
+    }
+
+    final message = error.toString().toLowerCase();
+    if (message.contains('socket') ||
+        message.contains('http') ||
+        message.contains('network') ||
+        message.contains('connection')) {
+      return const SpeechModelDownloadException().userMessage;
+    }
+    if (message.contains('ffmpeg') ||
+        message.contains('decode') ||
+        message.contains('audio')) {
+      return const MediaAudioExtractionException().userMessage;
+    }
+    if (message.contains('model') || message.contains('vosk')) {
+      return const SpeechModelException().userMessage;
+    }
+    if (message.contains('space') ||
+        message.contains('storage') ||
+        message.contains('enospc')) {
+      return 'The device does not have enough free storage for offline '
+          'captions. Free some space, then retry.';
+    }
+    return const SpeechRecognitionException().userMessage;
   }
 
   static bool isNetworkError(String message) {
-    return message.toLowerCase().contains('network');
-  }
-
-  static bool isPermissionError(String message) {
     final normalized = message.toLowerCase();
-    return normalized.contains('not-allowed') ||
-        normalized.contains('permission') ||
-        normalized.contains('service-not-allowed');
+    return normalized.contains('network') ||
+        normalized.contains('socket') ||
+        normalized.contains('http');
   }
 
-  Future<void> startListening({
-    required void Function(String) onResult,
-    required void Function(String) onError,
+  Future<void> _run({
+    required int generation,
+    required int epoch,
+    required String mediaPath,
+    required Duration Function() position,
+    required void Function(String text) onResult,
+    required void Function(String message) onError,
+    required void Function(SpeechStatus status) onStatus,
   }) async {
-    if (!_isAvailable) {
-      onError('Speech recognition is not available.');
-      return;
-    }
-    if (_isListening || _isStarting) {
-      return;
-    }
-
-    _isStarting = true;
+    SpeechSession? session;
+    var activated = false;
     try {
-      await _speech.listen(
-        onResult: (result) {
-          final words = result.recognizedWords.trim();
-          if (words.isNotEmpty) {
-            onResult(words);
+      onStatus(SpeechStatus.extractingAudio);
+      session = await _backend.createSession(mediaPath);
+      if (!_isCurrent(generation)) {
+        await session.dispose();
+        session = null;
+        return;
+      }
+
+      activated = true;
+      _nextPosition = _safePosition(position);
+      var lastObserved = _nextPosition;
+      onStatus(SpeechStatus.transcribing);
+
+      while (_isCurrent(generation)) {
+        final current = _safePosition(position);
+        if ((current - lastObserved).abs() > _seekThreshold) {
+          _nextPosition = current;
+          _finalText = '';
+          _partialText = '';
+          await session.reset();
+          if (!_isCurrent(generation)) {
+            break;
           }
-        },
-        listenOptions: stt.SpeechListenOptions(
-          listenFor: const Duration(hours: 1),
-          pauseFor: const Duration(seconds: 10),
-          cancelOnError: false,
-          partialResults: true,
-        ),
-      );
-      _isListening = _speech.isListening;
+          _emit('', epoch, onResult);
+        }
+        lastObserved = current;
+
+        if (_resetPending) {
+          _resetPending = false;
+          _nextPosition = current;
+          _finalText = '';
+          _partialText = '';
+          await session.reset();
+          if (!_isCurrent(generation)) {
+            break;
+          }
+          _emit('', epoch, onResult);
+        }
+
+        final available = current - _captionLatency;
+        if (_nextPosition >= available) {
+          await _waitForTick();
+          continue;
+        }
+
+        var chunk = available - _nextPosition;
+        if (chunk > _maximumChunk) {
+          chunk = _maximumChunk;
+        }
+        if (chunk < _minimumChunk) {
+          await _waitForTick();
+          continue;
+        }
+
+        final pcm = await session.read(_nextPosition, chunk);
+        if (!_isCurrent(generation)) {
+          break;
+        }
+        if (pcm.isEmpty) {
+          await _waitForTick();
+          continue;
+        }
+
+        _nextPosition += session.durationForBytes(pcm.length);
+        final update = await session.accept(pcm);
+        if (!_isCurrent(generation)) {
+          break;
+        }
+        if (_resetPending) {
+          continue;
+        }
+        _apply(update, epoch, onResult);
+      }
     } catch (error) {
-      _isListening = false;
-      onError(error.toString());
+      if (_isCurrent(generation)) {
+        _active = false;
+        _displayCallback = null;
+        onError(userFriendlyError(error));
+      }
     } finally {
-      _isStarting = false;
+      if (_flushOnStop && activated && session != null) {
+        try {
+          await _drainRemaining(session, position, epoch, onResult);
+          _apply(await session.finish(), epoch, onResult);
+        } catch (_) {
+          // Stopping is best-effort; the last caption remains visible.
+        }
+      }
+      await session?.dispose();
     }
   }
 
-  Future<void> stopListening() async {
-    if (!_isListening && !_isAvailable) {
+  Future<void> _drainRemaining(
+    SpeechSession session,
+    Duration Function() position,
+    int epoch,
+    void Function(String text) onResult,
+  ) async {
+    final current = _safePosition(position);
+    while (_nextPosition < current) {
+      var chunk = current - _nextPosition;
+      if (chunk > _maximumChunk) {
+        chunk = _maximumChunk;
+      }
+      if (chunk < const Duration(milliseconds: 20)) {
+        break;
+      }
+      final pcm = await session.read(_nextPosition, chunk);
+      if (pcm.isEmpty) {
+        break;
+      }
+      _nextPosition += session.durationForBytes(pcm.length);
+      _apply(await session.accept(pcm), epoch, onResult);
+    }
+  }
+
+  void _apply(
+    SpeechUpdate update,
+    int epoch,
+    void Function(String text) onResult,
+  ) {
+    if (epoch != _epoch || _disposed) {
       return;
     }
+    if (update.finalText.trim().isNotEmpty) {
+      _finalText = _tailWords('$_finalText ${update.finalText}', 40);
+      _partialText = '';
+      _emit(_composeCaption(), epoch, onResult);
+    } else if (update.partialText.trim().isNotEmpty) {
+      _partialText = update.partialText.trim();
+      _emit(_composeCaption(), epoch, onResult);
+    }
+  }
 
+  String _composeCaption() => _tailWords('$_finalText $_partialText', 32);
+
+  static String _tailWords(String text, int maximumWords) {
+    final words = text
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .toList(growable: false);
+    if (words.length <= maximumWords) {
+      return words.join(' ');
+    }
+    return words.sublist(words.length - maximumWords).join(' ');
+  }
+
+  void _emit(String text, int epoch, void Function(String text) onResult) {
+    if (epoch != _epoch || _disposed) {
+      return;
+    }
+    onResult(text);
+  }
+
+  Future<void> _stopCurrent({required bool flush}) async {
+    _flushOnStop = flush;
+    _active = false;
+    _generation += 1;
+    _resetPending = false;
+    _signal();
+
+    final pump = _pumpFuture;
+    _pumpFuture = null;
+    if (pump != null) {
+      try {
+        await pump;
+      } catch (_) {
+        // The pump reports its own failures through onError.
+      }
+    }
+    _flushOnStop = false;
+    _displayCallback = null;
+  }
+
+  Future<void> _waitForTick() async {
+    if (!_active || _disposed) {
+      return;
+    }
+    final wake = Completer<void>();
+    _wake = wake;
     try {
-      await _speech.stop();
+      await Future.any<void>([
+        wake.future,
+        Future<void>.delayed(_pollInterval),
+      ]);
     } finally {
-      _isListening = false;
+      if (identical(_wake, wake)) {
+        _wake = null;
+      }
+    }
+  }
+
+  void _signal() {
+    final wake = _wake;
+    if (wake != null && !wake.isCompleted) {
+      wake.complete();
+    }
+    _wake = null;
+  }
+
+  bool _isCurrent(int generation) {
+    return _active && !_disposed && _generation == generation;
+  }
+
+  static Duration _safePosition(Duration Function() position) {
+    try {
+      final value = position();
+      return value < Duration.zero ? Duration.zero : value;
+    } catch (_) {
+      return Duration.zero;
     }
   }
 }

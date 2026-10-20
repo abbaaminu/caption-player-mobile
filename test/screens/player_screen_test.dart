@@ -11,7 +11,6 @@ import 'package:live_caption_player/screens/player_screen.dart';
 import 'package:live_caption_player/services/activation_link_service.dart';
 import 'package:live_caption_player/services/api_service.dart';
 import 'package:live_caption_player/services/media_picker_service.dart';
-import 'package:live_caption_player/services/microphone_permission_service.dart';
 import 'package:live_caption_player/services/storage_service.dart';
 import 'package:live_caption_player/theme/app_theme.dart';
 
@@ -229,7 +228,6 @@ Future<void> _pumpPlayer(
         storageService: StorageService(store: store),
         apiService: apiService,
         activationLinkSource: linkSource,
-        microphonePermissions: _FakeMicrophonePermissions(),
         mediaPicker: _FakeMediaPicker(),
       ),
     ),
@@ -291,12 +289,4 @@ class _FakeActivationLinks implements ActivationLinkSource {
 class _FakeMediaPicker implements MediaPickerService {
   @override
   Future<PlatformFile?> pickMedia() async => null;
-}
-
-class _FakeMicrophonePermissions implements MicrophonePermissionService {
-  @override
-  Future<bool> request() async => true;
-
-  @override
-  Future<bool> openSettings() async => true;
 }
