@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **iOS build: Vosk C API no longer visible to Swift.** `vosk_api.h` moved into
+  `ios/vosk_flutter_service/VoskAPI/include/` and the `VoskAPI` Clang wrapper
+  target was restored in `Package.swift`. The old manifest declared a single
+  Swift target with no access to the header and no dependency on
+  `vosk.xcframework`, so SwiftPM builds failed with `Cannot find
+  'vosk_model_new' in scope` and (once the header was reachable) would have
+  failed to link `libvosk.a`.
+- **`ios/vosk_flutter_service.podspec` pointed at the wrong XCFramework path**
+  (`Frameworks/vosk.xcframework`, i.e. `ios/Frameworks/…`, which does not
+  exist). It now uses `vosk_flutter_service/Frameworks/vosk.xcframework`,
+  matching the installer output, and sets `static_framework` so `libvosk.a` is
+  not wrapped in a dynamic framework that hides `vosk_*` symbols from the app.
+- **`Package.swift` could not resolve `import Flutter`.** The manifest now
+  declares the Flutter-generated `FlutterFramework` package
+  (`.package(name: "FlutterFramework", path: "../FlutterFramework")`) and adds it
+  as a target dependency, matching Flutter's `plugin_swift_package_manager`
+  template and the plugins Flutter itself ships.
+- **Missing `-lc++` / `-framework Accelerate` under SwiftPM.**
+  `ios/vosk_flutter_service/VoskAPI/include/module.modulemap` is a custom module
+  map (SwiftPM uses it verbatim instead of generating one) with `link "c++"` and
+  `link framework "Accelerate"` autolink directives, so the app links the C++
+  runtime and Accelerate that `libvosk.a` requires.
+- `dart run vosk_flutter_service install -t ios` now downloads the XCFramework
+  into `ios/vosk_flutter_service/Frameworks/`, inside the Swift package, because
+  SwiftPM binary targets cannot reference paths outside the package root. Delete
+  an older `ios/Frameworks/` directory after upgrading; the installer will fetch
+  the framework again.
+
 ## [0.1.2] - 2026-06-25
 
 ### Added

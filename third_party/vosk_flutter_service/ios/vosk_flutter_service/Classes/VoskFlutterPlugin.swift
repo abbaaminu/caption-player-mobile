@@ -3,7 +3,16 @@ import Flutter
 import UIKit
 import AVFoundation
 
-// vosk_api.h is exposed via the pod's public headers AND the module map.
+// The Vosk C API (vosk_api.h) does not ship as a Swift module inside the Vosk
+// XCFramework, so it reaches Swift in one of two ways:
+//  * Swift Package Manager: through the `VoskAPI` Clang target declared in
+//    Package.swift, imported explicitly below.
+//  * CocoaPods: vosk_api.h is a public header of this pod, so it lands in the
+//    pod's umbrella header and is implicitly imported by the pod's Swift module
+//    (Flutter builds pods as frameworks; see ios/vosk_flutter_service.podspec).
+#if canImport(VoskAPI)
+import VoskAPI
+#endif
 
 public class VoskFlutterPlugin: NSObject, FlutterPlugin {
     var channel: FlutterMethodChannel?

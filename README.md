@@ -107,8 +107,19 @@ dart run vosk_flutter_service install -t ios
 ```
 
 Run that command again in a fresh checkout or if
-`third_party/vosk_flutter_service/ios/Frameworks` is deleted; the framework is
-git-ignored and not committed to this repository. Android needs no extra setup.
+`third_party/vosk_flutter_service/ios/vosk_flutter_service/Frameworks` is
+deleted; the framework is git-ignored and not committed to this repository.
+
+The iOS build uses Flutter's Swift Package Manager integration
+(`ios/Runner.xcodeproj` references `FlutterGeneratedPluginSwiftPackage`), so the
+plugin is compiled from `third_party/vosk_flutter_service/ios/vosk_flutter_service/Package.swift`,
+which pulls the Vosk framework in as a SwiftPM binary target. Install the
+framework before the first iOS build, and run `flutter clean` once if you added
+it after a failed build: Xcode caches the failed package resolution. The
+podspec in the same directory is only used if SwiftPM is turned off for the
+project.
+
+Android needs no extra setup.
 
 Build web and Android release artifacts with:
 

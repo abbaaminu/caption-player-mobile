@@ -27,9 +27,37 @@ The iOS XCFramework is **not** committed. Populate it after `flutter pub get`:
 dart run vosk_flutter_service install -t ios
 ```
 
-The installer writes to this package's `ios/Frameworks/` directory. That
-directory is git-ignored and must be regenerated in a clean checkout, including
-CI, before building for iOS.
+The installer writes to this package's `ios/vosk_flutter_service/Frameworks/`
+directory. That directory is git-ignored and must be regenerated in a clean
+checkout, including CI, before building for iOS.
+
+The framework lives inside the Swift package directory (rather than
+`ios/Frameworks/`) because `Package.swift` declares it as a SwiftPM binary
+target, and SwiftPM rejects binary target paths outside the package root. Both
+`ios/vosk_flutter_service.podspec` (CocoaPods) and `Package.swift` (SwiftPM)
+point at that location.
+
+The plugin needs the Vosk C API in Swift scope. On CocoaPods this works because
+`vosk_api.h` is a public header of the pod, so it is part of the pod's umbrella
+header. On SwiftPM it works through the `VoskAPI` Clang wrapper target, which is
+why `VoskFlutterPlugin.swift` starts with:
+
+```swift
+#if canImport(VoskAPI)
+import VoskAPI
+#endif
+```
+
+`VoskAPI/include/module.modulemap` is a custom module map: SwiftPM uses it
+verbatim and it carries `link "c++"` / `link framework "Accelerate"`, so every
+object file that imports the module records the autolink options that the Runner
+target needs to link `libvosk.a`.
+
+`Package.swift` also declares a dependency on `../FlutterFramework`, the package
+the Flutter tool generates inside `ios/Flutter/ephemeral/Packages/.packages/`.
+That is the canonical way for a plugin written in Swift to `import Flutter`, and
+it is the same layout Flutter's own `plugin_swift_package_manager` template
+generates.
 
 To update the fork, copy `lib/`, `bin/`, `android/`, and the non-framework files
 from `ios/` in the new published package, reapply the platform-table and

@@ -54,7 +54,15 @@ class _InstallCommand extends Command<void> {
       case TargetOsType.windows:
         return path.join(voskPackagePath, 'windows', 'libs');
       case TargetOsType.ios:
-        return path.join(voskPackagePath, 'ios', 'Frameworks');
+        // Kept inside the Swift package directory (ios/vosk_flutter_service)
+        // so the Package.swift binary target can reference it. SwiftPM rejects
+        // binary target paths outside the package root.
+        return path.join(
+          voskPackagePath,
+          'ios',
+          'vosk_flutter_service',
+          'Frameworks',
+        );
       case TargetOsType.macos:
         return path.join(voskPackagePath, 'macos', 'Frameworks');
     }
