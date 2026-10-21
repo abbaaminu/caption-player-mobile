@@ -1,7 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     
-    <!-- On-device captioning decodes the selected media file. It never opens
-         the microphone, so no audio-recording permission is requested. -->
+    <!-- Live captions use the device speech recognizer, which listens to
+         nearby playback through the microphone. The plugin prompts for this
+         permission when captions start. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
@@ -48,6 +50,11 @@
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
+        </intent>
+        <!-- Required on Android 11+ so speech_to_text can find the device's
+             speech recognition service. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
     </queries>
 </manifest>

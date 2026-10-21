@@ -1,241 +1,368 @@
-import 'dart:async';
-import 'dart:typed_data';
-
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:live_caption_player/services/speech_backend.dart';
 import 'package:live_caption_player/services/speech_service.dart';
 
 void main() {
-  group('SpeechService error mapping', () {
-    test('explains unsupported web and desktop builds', () {
-      final message = SpeechService.userFriendlyError(
-        'MissingPluginException',
-        isWeb: true,
-      );
+  group('SpeechService.initialize', () {
+    test(
+      'reports an unsupported platform without starting the engine',
+      () async {
+        final engine = _FakeEngine(supported: false);
+        final service = SpeechService(engine: engine);
+        final statuses = <SpeechStatus>[];
+        String? error;
 
-      expect(message, contains('Android and iOS'));
-      expect(message, contains('decode'));
-      expect(message, isNot(contains('microphone')));
-    });
+        final available = await service.initialize(
+          onError: (message) => error = message,
+          onStatus: statuses.add,
+        );
 
-    test('maps download failures to a first-run network message', () {
-      final message = SpeechService.userFriendlyError(
-        'SocketException: Network is unreachable',
-      );
+        expect(available, isFalse);
+        expect(engine.initializeCalls, 0);
+        expect(statuses, isEmpty);
+        expect(error, const UnsupportedSpeechPlatformException().userMessage);
+        expect(service.isInitialized, isFalse);
+      },
+    );
 
-      expect(message, contains('Connect to the internet'));
-      expect(message, contains('first run'));
-    });
-
-    test('maps extraction failures to media guidance', () {
-      final message = SpeechService.userFriendlyError('FFmpeg returned 1');
-
-      expect(message, contains('audio track'));
-      expect(message, contains('MP4'));
-    });
-
-    test('maps model failures to storage and retry guidance', () {
-      final message = SpeechService.userFriendlyError(
-        'Vosk model could not be loaded',
-      );
-
-      expect(message, contains('offline speech model'));
-      expect(message, contains('free storage'));
-    });
-
-    test('uses typed exception messages directly', () {
-      final message = SpeechService.userFriendlyError(
-        const MediaAudioExtractionException(cause: 'no audio stream'),
-      );
-
-      expect(message, contains('audio track'));
-    });
-
-    test('classifies network failures', () {
-      expect(SpeechService.isNetworkError('SocketException'), isTrue);
-      expect(SpeechService.isNetworkError('ffmpeg failed'), isFalse);
-    });
-  });
-
-  group('SpeechService pipeline', () {
-    test('rejects unsupported platforms with a user-facing message', () async {
-      final service = SpeechService(
-        backend: _FakeSpeechBackend(supported: false),
-      );
+    test('maps a denied permission to actionable wording', () async {
+      final engine = _FakeEngine(initializationError: 'permission denied');
+      final service = SpeechService(engine: engine);
       String? error;
 
-      final initialized = await service.initialize(
+      final available = await service.initialize(
         onError: (message) => error = message,
       );
 
-      expect(initialized, isFalse);
-      expect(error, contains('Android and iOS'));
-      await service.dispose();
+      expect(available, isFalse);
+      expect(error, const SpeechPermissionException().userMessage);
     });
 
-    test('streams recognized media audio into the caption callback', () async {
-      final session = _FakeSpeechSession();
-      final service = SpeechService(
-        backend: _FakeSpeechBackend(session: session),
-      );
-      final captionReady = Completer<String>();
-      var latestCaption = '';
-      final playbackStart = DateTime.now();
+    test('returns true once the platform recognizer is ready', () async {
+      final engine = _FakeEngine();
+      final service = SpeechService(engine: engine);
+      final statuses = <SpeechStatus>[];
 
-      final initialized = await service.initialize(onError: fail);
-      expect(initialized, isTrue);
-
-      await service.startTranscription(
-        mediaPath: '/tmp/example.mp4',
-        position: () =>
-            const Duration(seconds: 3) +
-            Duration(
-              milliseconds: DateTime.now()
-                  .difference(playbackStart)
-                  .inMilliseconds,
-            ),
-        onResult: (text) {
-          latestCaption = text;
-          if (text.contains('hello world') && !captionReady.isCompleted) {
-            captionReady.complete(text);
-          }
-        },
-        onError: fail,
-        onStatus: (_) {},
+      final available = await service.initialize(
+        onError: (_) {},
+        onStatus: statuses.add,
       );
 
-      final caption = await captionReady.future.timeout(
-        const Duration(seconds: 2),
-      );
-      expect(caption, contains('hello world'));
-      expect(service.isActive, isTrue);
+      expect(available, isTrue);
+      expect(service.isInitialized, isTrue);
+      expect(engine.initializeCalls, 1);
+      expect(statuses, [SpeechStatus.preparing]);
+    });
+  });
 
-      await service.stop();
-      expect(service.isActive, isFalse);
-      expect(latestCaption, isNotEmpty);
-      await service.dispose();
+  group('SpeechService listening', () {
+    test('streams partial and final captions without duplicate updates', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(engine: engine);
+        final results = <String>[];
+        String? error;
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(
+          onResult: results.add,
+          onError: (message) => error = message,
+        );
+        async.flushMicrotasks();
+
+        engine.emit('hello world', false);
+        engine.emit('hello world', false);
+        engine.emit('hello world again', false);
+        engine.emit('hello world again', false);
+        engine.emit('hello world again', true);
+
+        expect(results, ['', 'hello world', 'hello world again']);
+        expect(error, isNull);
+        expect(engine.listenCalls, 1);
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
     });
 
-    test('clears the caption when the player seeks', () async {
-      final session = _FakeSpeechSession();
-      final service = SpeechService(
-        backend: _FakeSpeechBackend(session: session),
+    test('keeps committed words when the recognizer renews its session', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(
+          engine: engine,
+          initialRestartDelay: const Duration(milliseconds: 5),
+        );
+        final results = <String>[];
+        final statuses = <SpeechStatus>[];
+
+        service.initialize(onError: (_) {}, onStatus: statuses.add);
+        async.flushMicrotasks();
+        service.startListening(
+          onResult: results.add,
+          onError: (_) {},
+          onStatus: statuses.add,
+        );
+        async.flushMicrotasks();
+
+        engine.emit('first phrase', true);
+        engine.finishSession();
+        async.elapse(const Duration(milliseconds: 5));
+        async.flushMicrotasks();
+
+        expect(engine.listenCalls, 2);
+        expect(statuses, contains(SpeechStatus.listening));
+
+        engine.emit('second phrase', true);
+
+        expect(results.last, 'first phrase second phrase');
+        expect(service.isActive, isTrue);
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('resets the restart backoff after each successful session', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(
+          engine: engine,
+          initialRestartDelay: const Duration(milliseconds: 10),
+        );
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(onResult: (_) {}, onError: (_) {});
+        async.flushMicrotasks();
+
+        engine.emit('first phrase', true);
+        engine.finishSession();
+        async.elapse(const Duration(milliseconds: 10));
+        async.flushMicrotasks();
+        expect(engine.listenCalls, 2);
+
+        engine.emit('second phrase', true);
+        engine.finishSession();
+        async.elapse(const Duration(milliseconds: 10));
+        async.flushMicrotasks();
+        expect(engine.listenCalls, 3);
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('pause stops the microphone and startListening resumes', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(engine: engine);
+        final results = <String>[];
+        final statuses = <SpeechStatus>[];
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(
+          onResult: results.add,
+          onError: (_) {},
+          onStatus: statuses.add,
+        );
+        async.flushMicrotasks();
+
+        engine.emit('hello', false);
+        service.pause();
+        async.flushMicrotasks();
+
+        expect(engine.stopCalls, 1);
+        expect(service.isActive, isFalse);
+        expect(statuses, contains(SpeechStatus.paused));
+        expect(results.last, 'hello');
+
+        service.startListening(
+          onResult: results.add,
+          onError: (_) {},
+          onStatus: statuses.add,
+        );
+        async.flushMicrotasks();
+
+        expect(engine.listenCalls, 2);
+        expect(results.last, isEmpty);
+
+        engine.emit('again', true);
+        expect(results.last, 'again');
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('gives up after six consecutive listen failures', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine(listenError: StateError('recognizer busy'));
+        final service = SpeechService(
+          engine: engine,
+          initialRestartDelay: const Duration(milliseconds: 1),
+          maximumRestartDelay: const Duration(milliseconds: 5),
+        );
+        final errors = <String>[];
+        final statuses = <SpeechStatus>[];
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(
+          onResult: (_) {},
+          onError: errors.add,
+          onStatus: statuses.add,
+        );
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(seconds: 1));
+        async.flushMicrotasks();
+
+        expect(engine.listenCalls, 6);
+        expect(errors, [const SpeechRecognitionException().userMessage]);
+        expect(statuses.last, SpeechStatus.paused);
+        expect(service.isActive, isFalse);
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
+    });
+
+    test('stop cancels the engine and ignores late results', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(engine: engine);
+        final results = <String>[];
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(onResult: results.add, onError: (_) {});
+        async.flushMicrotasks();
+
+        engine.emit('before stop', true);
+        service.stop();
+        async.flushMicrotasks();
+        engine.emit('after stop', true);
+
+        expect(engine.cancelCalls, 1);
+        expect(results.last, 'before stop');
+        expect(service.isActive, isFalse);
+      });
+    });
+  });
+
+  group('SpeechService wording', () {
+    test('maps recognizer errors to actionable messages', () {
+      expect(
+        userFriendlyError('permission denied', isWeb: false),
+        const SpeechPermissionException().userMessage,
       );
-      final captionReady = Completer<void>();
-      var latestCaption = '';
-      final playbackStart = DateTime.now();
-
-      await service.initialize(onError: fail);
-      await service.startTranscription(
-        mediaPath: '/tmp/example.mp4',
-        position: () =>
-            const Duration(seconds: 3) +
-            Duration(
-              milliseconds: DateTime.now()
-                  .difference(playbackStart)
-                  .inMilliseconds,
-            ),
-        onResult: (text) {
-          latestCaption = text;
-          if (text.isNotEmpty && !captionReady.isCompleted) {
-            captionReady.complete();
-          }
-        },
-        onError: fail,
-        onStatus: (_) {},
+      expect(
+        userFriendlyError('network timeout'),
+        contains('network connection'),
       );
-      await captionReady.future.timeout(const Duration(seconds: 2));
+      expect(userFriendlyError('no speech detected'), contains('No speech'));
+      expect(userFriendlyError('recognizer busy'), contains('busy'));
+      expect(userFriendlyError('audio error'), contains('microphone'));
+      expect(
+        userFriendlyError('unknown failure'),
+        const SpeechRecognitionException().userMessage,
+      );
+    });
 
-      service.seek(const Duration(seconds: 12));
-      await Future<void>.delayed(const Duration(milliseconds: 250));
-
-      expect(latestCaption, isEmpty);
-      expect(session.resetCount, greaterThan(0));
-      await service.dispose();
+    test('describes each caption status for the player chip', () {
+      expect(
+        SpeechService.statusMessage(SpeechStatus.preparing),
+        'Preparing live captions…',
+      );
+      expect(
+        SpeechService.statusMessage(SpeechStatus.listening),
+        'Live captions on',
+      );
+      expect(
+        SpeechService.statusMessage(SpeechStatus.paused),
+        'Live captions paused',
+      );
     });
   });
 }
 
-class _FakeSpeechBackend implements SpeechBackend {
-  _FakeSpeechBackend({this.supported = true, _FakeSpeechSession? session})
-    : session = session ?? _FakeSpeechSession();
+class _FakeEngine implements SpeechRecognitionEngine {
+  _FakeEngine({
+    this.supported = true,
+    this.initializationError,
+    this.listenError,
+  });
 
   final bool supported;
-  final _FakeSpeechSession session;
-  bool disposed = false;
+  final String? initializationError;
+  final Object? listenError;
+
+  int initializeCalls = 0;
+  int listenCalls = 0;
+  int stopCalls = 0;
+  int cancelCalls = 0;
+  bool listening = false;
+
+  void Function(String words, bool isFinal)? _onResult;
+  void Function(SpeechEngineStatus status)? _onStatus;
 
   @override
   bool get isSupported => supported;
 
   @override
+  bool get isListening => listening;
+
+  @override
   Future<bool> initialize({
-    required void Function(SpeechStatus status) onStatus,
+    required void Function(String message, bool permanent) onError,
+    required void Function(SpeechEngineStatus status) onStatus,
   }) async {
-    onStatus(SpeechStatus.downloadingModel);
-    onStatus(SpeechStatus.loadingModel);
-    return supported;
-  }
-
-  @override
-  Future<SpeechSession> createSession(String mediaPath) async => session;
-
-  @override
-  Future<void> dispose() async {
-    disposed = true;
-  }
-}
-
-class _FakeSpeechSession implements SpeechSession {
-  static const int _bytesPerSecond = 16000 * 2;
-
-  bool disposed = false;
-  int resetCount = 0;
-  int acceptCount = 0;
-
-  @override
-  int get sampleRate => 16000;
-
-  @override
-  Duration get duration => const Duration(minutes: 1);
-
-  @override
-  Future<Uint8List> read(Duration position, Duration maximumLength) async {
-    final requested =
-        maximumLength.inMicroseconds *
-        _bytesPerSecond ~/
-        Duration.microsecondsPerSecond;
-    return Uint8List(requested.clamp(0, 32000));
-  }
-
-  @override
-  Duration durationForBytes(int byteLength) {
-    return Duration(
-      microseconds:
-          byteLength * Duration.microsecondsPerSecond ~/ _bytesPerSecond,
-    );
-  }
-
-  @override
-  Future<SpeechUpdate> accept(Uint8List pcm) async {
-    acceptCount += 1;
-    if (acceptCount == 1) {
-      return const SpeechUpdate(finalText: 'hello world');
+    initializeCalls += 1;
+    _onStatus = onStatus;
+    final error = initializationError;
+    if (error != null) {
+      onError(error, true);
+      return false;
     }
-    return const SpeechUpdate(partialText: 'hello world again');
+    return true;
   }
 
   @override
-  Future<SpeechUpdate> finish() async {
-    return const SpeechUpdate(finalText: 'final words');
+  Future<void> listen({
+    required void Function(String words, bool isFinal) onResult,
+    required Duration listenFor,
+    required Duration pauseFor,
+  }) async {
+    listenCalls += 1;
+    _onResult = onResult;
+    final error = listenError;
+    if (error != null) {
+      listening = false;
+      throw error;
+    }
+    listening = true;
   }
 
   @override
-  Future<void> reset() async {
-    resetCount += 1;
+  Future<void> stop() async {
+    stopCalls += 1;
+    listening = false;
   }
 
   @override
-  Future<void> dispose() async {
-    disposed = true;
+  Future<void> cancel() async {
+    cancelCalls += 1;
+    listening = false;
+  }
+
+  void emit(String words, bool isFinal) {
+    _onResult?.call(words, isFinal);
+  }
+
+  void finishSession() {
+    listening = false;
+    _onStatus?.call(SpeechEngineStatus.done);
   }
 }

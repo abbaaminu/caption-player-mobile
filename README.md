@@ -1,53 +1,48 @@
 # Live Caption Player
 
 A Flutter media player for Android, iOS, and the web. Select a video or audio
-file, play it, and display captions generated from that file's own audio track.
-On Android and iOS the audio is decoded locally and transcribed on-device; the
-app never opens the microphone.
+file, play it, and see live captions produced by the device's speech
+recognition. Captions listen to nearby playback through the microphone; the app
+does not record or store audio.
 
 ## Supported platforms
 
-- Android 7.0+ phones and tablets: playback and on-device captions
-- iPhone and iPad running iOS 14+: playback and on-device captions
-- Modern web browsers: playback only. The current FFmpeg/Vosk native plugins
-  have no working web implementation, so file-audio captions are unavailable in
-  the web build and the app shows an explicit message instead of opening the
-  microphone.
+- Android 7.0+ phones and tablets: playback and live captions through the
+  device speech recognizer
+- iPhone and iPad running iOS 14+: playback and live captions through iOS Speech
+- Modern web browsers with the SpeechRecognition API (typically Chrome or Edge):
+  playback and live captions when the app is served over HTTPS or localhost
 
 Windows, macOS, and Linux desktop targets are not included.
 
-## How file-audio captions work
+## How live captions work
 
 1. Opening a media file starts playback immediately.
-2. `ffmpeg_kit_flutter_new_audio` extracts the first audio stream from the
-   selected file into a temporary WAV file using:
-   `-vn -acodec pcm_s16le -ar 16000 -ac 1`.
-3. The first time captions run, the compact English Vosk model
-   (`vosk-model-small-en-us-0.15`, about 40 MB) is downloaded and cached in the
-   app documents directory. Later sessions are fully offline.
-4. `vosk_flutter_service` creates an on-device recognizer at 16 kHz. The app
-   reads only the PCM that playback has reached, feeds it to Vosk, and updates
-   the yellow caption overlay with partial and finalized text.
-5. Pausing stops audio feed without destroying recognizer state. Seeking resets
-   the recognizer and clears stale caption text. Stopping or completing playback
-   flushes the final buffered audio.
+2. `speech_to_text` wraps Android's `SpeechRecognizer`, iOS Speech, and the
+   browser's `SpeechRecognition` API. The microphone picks up the audio played
+   through the device speaker, so playback must stay audible.
+3. While playback is running, captions listen in rolling sessions. Platform
+   recognizers end a session after a stretch of silence or their maximum
+   session length; the service renews the session automatically and keeps the
+   last caption instead of stopping.
+4. Partial results update the yellow caption overlay as words are recognized,
+   and a short rolling window keeps the newest phrases visible.
+5. Pausing playback pauses the microphone and preserves the last caption.
+   Resuming starts a new session. Completing playback, opening another file, or
+   locking for the paywall stops recognition.
+6. The first caption session requests microphone and speech-recognition
+   permission. Recognition may run on-device or through the platform provider's
+   service, depending on the device and installed languages.
 
-No `RECORD_AUDIO` permission and no `NSMicrophoneUsageDescription` are declared.
-The app does not request microphone or speech-recognition access. The merged
-Android manifest contains `INTERNET` (used for the one-time model download and
-license verification) plus `ACCESS_NETWORK_STATE` and `WAKE_LOCK`, which the
-media playback and FFmpeg libraries contribute.
+Android declares `RECORD_AUDIO` and a `<queries>` entry for
+`android.speech.RecognitionService` so Android 11+ can find the recognizer. iOS
+declares `NSMicrophoneUsageDescription` and
+`NSSpeechRecognitionUsageDescription`. No audio is written to storage; only the
+recognized text is shown.
 
-The model is English-only by default. To use another Vosk model, change
-`AppConfig.speechModelUrl` in `lib/config/app_config.dart`; the ZIP must extract
-to a top-level directory named exactly like the ZIP file (without `.zip`).
-
-Third-party components: the audio-only FFmpeg Kit fork is LGPL-3.0 and the Vosk
-runtime/model are Apache-2.0. Review their licenses before distributing the app.
-`vosk_flutter_service` is pinned to the minimal local fork in
-`third_party/vosk_flutter_service`; it removes upstream 0.1.2's invalid web
-plugin declaration (which breaks every Flutter web build) without changing the
-Dart API or native Android/iOS code. See that directory's README for details.
+Third-party components: `speech_to_text` is MIT-licensed. The recognition
+service itself is provided by the operating system or browser and is subject to
+that provider's terms.
 
 ## Trial and subscription settings
 
@@ -90,36 +85,16 @@ environment variables on the server; never place them in this Flutter app.
 Install Flutter, then run:
 
 ```sh
-flutter config --enable-native-assets
 flutter pub get
 flutter run
 ```
 
-Use `flutter devices` to choose an Android or iOS device. The web target can
-play files but cannot generate captions with this native pipeline, so use a
-mobile device to test captioning.
+Use `flutter devices` to choose an Android or iOS device, or run the web build
+from a secure origin. Live captions work on Android, iOS, and browsers that
+expose the SpeechRecognition API.
 
-For iOS builds, install the Vosk native framework into the local plugin
-directory once after fetching packages:
-
-```sh
-dart run vosk_flutter_service install -t ios
-```
-
-Run that command again in a fresh checkout or if
-`third_party/vosk_flutter_service/ios/vosk_flutter_service/Frameworks` is
-deleted; the framework is git-ignored and not committed to this repository.
-
-The iOS build uses Flutter's Swift Package Manager integration
-(`ios/Runner.xcodeproj` references `FlutterGeneratedPluginSwiftPackage`), so the
-plugin is compiled from `third_party/vosk_flutter_service/ios/vosk_flutter_service/Package.swift`,
-which pulls the Vosk framework in as a SwiftPM binary target. Install the
-framework before the first iOS build, and run `flutter clean` once if you added
-it after a failed build: Xcode caches the failed package resolution. The
-podspec in the same directory is only used if SwiftPM is turned off for the
-project.
-
-Android needs no extra setup.
+Android needs no extra setup. iOS permissions are declared in
+`ios/Runner/Info.plist`; iOS builds require macOS and Xcode.
 
 Build web and Android release artifacts with:
 
@@ -135,10 +110,10 @@ instead of invoking the secure-storage plugin. Browser storage is scoped to
 the deployed origin and is not encrypted; users can clear it in browser
 settings.
 
-iOS builds require macOS and Xcode. Run the Vosk iOS install command before
-building. The release workflow packages an unsigned iOS IPA as
-`live-caption-player-ios-unsigned.ipa`. Sign it with an Apple distribution
-certificate and provisioning profile before installing or distributing it.
+iOS builds require macOS and Xcode. The release workflow packages an unsigned
+iOS IPA as `live-caption-player-ios-unsigned.ipa`. Sign it with an Apple
+distribution certificate and provisioning profile before installing or
+distributing it.
 
 The Android application ID and iOS bundle identifier are
 `com.stackbuildco.livecaptionplayer`. Keep these identifiers stable after the
@@ -174,15 +149,33 @@ flutter analyze
 flutter test
 ```
 
-The tests cover the licensing client, on-device speech-service error mapping,
-the playback-synchronized caption pipeline, Vosk result parsing, WAV/PCM
-parsing, storage, activation-link parsing, media formats, web-origin checks,
-and the player screen's startup, paywall, activation, and deep-link flows.
+The tests cover the licensing client, live speech-service session recovery and
+error mapping, the caption audio-guidance notice, storage, activation-link
+parsing, media formats, web-origin checks, and the player screen's startup,
+paywall, activation, and deep-link flows.
 
-On Windows, also set `PUB_CACHE` to a path without spaces and keep the project
-path space-free before running tests or Android builds. Flutter 3.44's
-native-asset build hooks do not quote paths correctly, so a location such as
-`C:\Users\ABBA AMINU\...` fails with `'C:\Users\ABBA' is not recognized`.
+On Windows, set `PUB_CACHE` to a path without spaces and run the project from a
+path that also has no spaces before running tests or Android builds. Flutter
+3.44's native-asset build hooks do not quote paths correctly, so a location such
+as `C:\Users\ABBA AMINU\...` fails with `'C:\Users\ABBA' is not recognized`. A
+temporary drive mapping works without moving the project:
+
+```powershell
+subst X: "C:\path\to"
+$env:PUB_CACHE = "C:\pubcache"
+Set-Location X:\premiumcaption_player
+flutter pub get
+flutter analyze
+flutter test
+```
+
+Map the project's parent folder and run from its subfolder, rather than mapping
+the project folder directly. Flutter 3.44's analyzer cannot log a workspace whose
+root is a drive root such as `X:\` and stops with an analysis-server
+`FormatException`. Run `flutter pub get` from the mapped path so generated
+tooling records that location. Remove the mapping with `subst X: /D` when you
+are done; run `flutter pub get` from the original path again if you need its
+generated files afterwards.
 
 ## Release workflow
 
@@ -206,24 +199,18 @@ tag.
 
 ## Caption limitations
 
-- Captions are generated on-device from the first audio track only. Embedded
-  subtitle tracks are not read, and a file without an audio stream shows an
-  error instead of captions.
-- The bundled default model is compact English
-  (`vosk-model-small-en-us-0.15`). Other languages require a different Vosk
-  model URL and enough storage for it.
-- The first caption session downloads about 40 MB of model data. It needs a
-  network connection; later sessions run offline. If playback starts before the
-  model is ready, captioning begins at the playback position reached when the
-  model and PCM extraction finish.
-- Audio extraction writes a temporary 16 kHz mono WAV file, roughly 115 MB per
-  hour of media, and removes it when the session ends. Large files can take a
-  few seconds to prepare.
-- Partial results may change as Vosk refines them. Seeking clears the current
-  caption and restarts recognition at the new position, so a word crossing the
-  seek point can be lost.
-- The web build plays selected files but does not generate captions; with a
-  native-only FFmpeg/Vosk pipeline the app reports that captions are unavailable
-  on the web instead of requesting microphone access.
+- Captions depend on the device's speech-recognition service and installed
+  languages. Availability, accuracy, and supported languages vary by device,
+  OS version, and browser.
+- Captions listen through the microphone, so playback must be audible. Using
+  headphones prevents the recognizer from hearing the audio.
+- Background noise, music, overlapping speech, and low volume reduce accuracy.
+- Recognizers end sessions after silence or a platform time limit. The service
+  restarts automatically while playback continues, but a word at the boundary
+  can be missed.
+- Web captions need a browser with the SpeechRecognition API (typically Chrome
+  or Edge) and an HTTPS or localhost origin. Safari and Firefox do not offer
+  this API, and the app reports that captions are unavailable instead of
+  silently failing.
 - The web version loads the chosen video into browser memory, so very large
   files may require substantial memory.

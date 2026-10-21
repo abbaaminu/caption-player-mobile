@@ -12,9 +12,6 @@ include: package:flutter_lints/flutter.yaml
 analyzer:
   exclude:
     - build/**
-    # Vendored third-party plugin; its upstream style is not governed by this
-    # project's lints. See third_party/vosk_flutter_service/README.md.
-    - third_party/**
   language:
     strict-casts: true
     strict-inference: true

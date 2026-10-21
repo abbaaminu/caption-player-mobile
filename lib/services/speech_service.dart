@@ -1,426 +1,529 @@
 import 'dart:async';
+import 'dart:math' as math;
 
-import 'speech_backend.dart';
-import 'speech_backend_stub.dart'
-    if (dart.library.io) 'speech_backend_io.dart'
-    as platform;
+import 'package:flutter/foundation.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
-/// Coordinates playback position, FFmpeg extraction, and Vosk recognition.
-///
-/// Audio is read from the extracted WAV file only up to the position the
-/// player has actually reached, so captions stay aligned with playback.
-class SpeechService {
-  SpeechService({SpeechBackend? backend})
-    : _backend = backend ?? platform.createSpeechBackend();
+/// Progress reported while preparing and running live captions.
+enum SpeechStatus { preparing, listening, paused }
 
-  static const Duration _pollInterval = Duration(milliseconds: 80);
-  static const Duration _seekThreshold = Duration(milliseconds: 1500);
-  static const Duration _captionLatency = Duration(milliseconds: 200);
-  static const Duration _minimumChunk = Duration(milliseconds: 250);
-  static const Duration _maximumChunk = Duration(seconds: 1);
+/// Session states reported by a platform speech engine.
+enum SpeechEngineStatus { listening, notListening, done }
 
-  final SpeechBackend _backend;
+/// Thin, mockable wrapper around the platform speech recognizer.
+abstract interface class SpeechRecognitionEngine {
+  bool get isSupported;
 
-  bool _initialized = false;
-  bool _active = false;
-  bool _disposed = false;
-  bool _flushOnStop = false;
-  int _generation = 0;
-  int _epoch = 0;
-
-  Future<void>? _pumpFuture;
-  Completer<void>? _wake;
-  Duration _nextPosition = Duration.zero;
-  bool _resetPending = false;
-  String _finalText = '';
-  String _partialText = '';
-  void Function(String text)? _displayCallback;
-
-  bool get isSupported => _backend.isSupported;
-  bool get isInitialized => _initialized;
-  bool get isActive => _active;
+  bool get isListening;
 
   Future<bool> initialize({
-    required void Function(String) onError,
+    required void Function(String message, bool permanent) onError,
+    required void Function(SpeechEngineStatus status) onStatus,
+  });
+
+  Future<void> listen({
+    required void Function(String words, bool isFinal) onResult,
+    required Duration listenFor,
+    required Duration pauseFor,
+  });
+
+  Future<void> stop();
+
+  Future<void> cancel();
+}
+
+/// Uses the device or browser speech-recognition service.
+///
+/// Captions listen to nearby audio through the microphone. The recognizer
+/// transcribes what it hears, so playback must be audible near the device.
+class PlatformSpeechRecognitionEngine implements SpeechRecognitionEngine {
+  PlatformSpeechRecognitionEngine({stt.SpeechToText? speech})
+    : _speech = speech ?? stt.SpeechToText();
+
+  final stt.SpeechToText _speech;
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  bool get isListening => _speech.isListening;
+
+  @override
+  Future<bool> initialize({
+    required void Function(String message, bool permanent) onError,
+    required void Function(SpeechEngineStatus status) onStatus,
+  }) async {
+    try {
+      return await _speech.initialize(
+        onError: (error) => onError(error.errorMsg, error.permanent),
+        onStatus: (status) => onStatus(_statusFor(status)),
+        debugLogging: kDebugMode,
+      );
+    } catch (error) {
+      onError(error.toString(), true);
+      return false;
+    }
+  }
+
+  @override
+  Future<void> listen({
+    required void Function(String words, bool isFinal) onResult,
+    required Duration listenFor,
+    required Duration pauseFor,
+  }) async {
+    await _speech.listen(
+      onResult: (result) =>
+          onResult(result.recognizedWords, result.finalResult),
+      listenOptions: stt.SpeechListenOptions(
+        partialResults: true,
+        cancelOnError: false,
+        listenFor: listenFor,
+        pauseFor: pauseFor,
+        listenMode: stt.ListenMode.dictation,
+      ),
+    );
+  }
+
+  @override
+  Future<void> stop() => _speech.stop();
+
+  @override
+  Future<void> cancel() => _speech.cancel();
+
+  static SpeechEngineStatus _statusFor(String status) {
+    switch (status) {
+      case 'listening':
+        return SpeechEngineStatus.listening;
+      case 'done':
+        return SpeechEngineStatus.done;
+      default:
+        return SpeechEngineStatus.notListening;
+    }
+  }
+}
+
+/// A captioning failure that already carries user-facing wording.
+class SpeechException implements Exception {
+  const SpeechException(this.userMessage, {this.cause});
+
+  final String userMessage;
+  final Object? cause;
+
+  @override
+  String toString() => 'SpeechException: $userMessage';
+}
+
+/// Speech recognition is missing on this device.
+class SpeechUnavailableException extends SpeechException {
+  const SpeechUnavailableException({Object? cause})
+    : super(
+        'Live speech recognition is unavailable on this device. Check that '
+        'speech recognition is installed and enabled, then retry captions.',
+        cause: cause,
+      );
+}
+
+/// The browser or operating system does not offer speech recognition.
+class UnsupportedSpeechPlatformException extends SpeechException {
+  const UnsupportedSpeechPlatformException({bool isWeb = false})
+    : super(
+        isWeb
+            ? 'This browser does not support live speech recognition. Try a '
+                  'current version of Chrome or Edge.'
+            : 'Live speech recognition is unavailable on this device. Check '
+                  'that speech recognition is installed and enabled, then '
+                  'retry captions.',
+      );
+}
+
+/// Microphone or speech-recognition permission was refused.
+class SpeechPermissionException extends SpeechException {
+  const SpeechPermissionException({bool isWeb = false, Object? cause})
+    : super(
+        isWeb
+            ? 'Microphone access is blocked. Allow microphone access for this '
+                  'site in your browser settings, then retry captions. Web '
+                  'captions also need HTTPS or localhost.'
+            : 'Microphone access is denied. Allow microphone and '
+                  'speech-recognition access for this app in device settings, '
+                  'then retry captions.',
+        cause: cause,
+      );
+}
+
+/// A transient failure stopped the current listening session.
+class SpeechRecognitionException extends SpeechException {
+  const SpeechRecognitionException({Object? cause})
+    : super(
+        'Live captions stopped unexpectedly. Retry captions, or check that '
+        'microphone access is still allowed.',
+        cause: cause,
+      );
+}
+
+/// Runs live captions from microphone audio and keeps them running.
+///
+/// Platform recognizers end their session after a period of silence or after
+/// the platform's maximum session length. While playback continues, this
+/// service transparently starts a new session so captions do not stop.
+class SpeechService {
+  SpeechService({
+    SpeechRecognitionEngine? engine,
+    this.initialRestartDelay = const Duration(milliseconds: 300),
+    this.maximumRestartDelay = const Duration(seconds: 5),
+  }) : _engine = engine ?? PlatformSpeechRecognitionEngine();
+
+  /// How long a single recognition session may run before it is renewed.
+  static const Duration listenFor = Duration(minutes: 5);
+
+  /// How much silence ends the current phrase.
+  static const Duration pauseFor = Duration(seconds: 4);
+
+  static const int _maximumCaptionWords = 32;
+  static const int _maximumCommittedWords = 60;
+  static const int _maximumConsecutiveFailures = 6;
+
+  final SpeechRecognitionEngine _engine;
+
+  /// Delay before the first automatic restart after a session ends.
+  final Duration initialRestartDelay;
+
+  /// Upper bound for the exponential restart backoff.
+  final Duration maximumRestartDelay;
+
+  bool _disposed = false;
+  bool _initialized = false;
+  bool _shouldListen = false;
+  bool _starting = false;
+  int _generation = 0;
+  int _restartAttempts = 0;
+  int _consecutiveFailures = 0;
+  Timer? _restartTimer;
+  String? _initializationError;
+  String _committedText = '';
+  String _partialText = '';
+  String _lastCaption = '';
+  void Function(String text)? _onResult;
+  void Function(String message)? _onError;
+  void Function(SpeechStatus status)? _onStatus;
+
+  bool get isSupported => _engine.isSupported;
+
+  bool get isInitialized => _initialized;
+
+  /// Whether captions should currently be listening.
+  bool get isActive => _shouldListen;
+
+  /// Short status text suitable for a playback status chip.
+  static String statusMessage(SpeechStatus status) => switch (status) {
+    SpeechStatus.preparing => 'Preparing live captions…',
+    SpeechStatus.listening => 'Live captions on',
+    SpeechStatus.paused => 'Live captions paused',
+  };
+
+  /// Requests microphone and speech-recognition permission and prepares the
+  /// platform recognizer. Returns `false` when captions cannot start.
+  Future<bool> initialize({
+    required void Function(String message) onError,
     void Function(SpeechStatus status)? onStatus,
   }) async {
     if (_disposed) {
       return false;
     }
-    if (!_backend.isSupported) {
-      onError(const UnsupportedSpeechPlatformException().userMessage);
+    if (!_engine.isSupported) {
+      onError(UnsupportedSpeechPlatformException(isWeb: kIsWeb).userMessage);
       return false;
     }
     if (_initialized) {
       return true;
     }
 
+    _initializationError = null;
+    onStatus?.call(SpeechStatus.preparing);
     try {
-      _initialized = await _backend.initialize(
-        onStatus: (status) {
-          if (!_disposed) {
-            onStatus?.call(status);
-          }
+      _initialized = await _engine.initialize(
+        onError: (message, permanent) {
+          _initializationError = message;
         },
+        onStatus: _handleEngineStatus,
       );
-      if (!_initialized) {
-        onError(
-          const SpeechModelException(
-            cause: 'Speech backend did not initialize.',
-          ).userMessage,
-        );
-      }
-      return _initialized;
     } catch (error) {
+      _initializationError = error.toString();
       _initialized = false;
-      onError(userFriendlyError(error));
-      return false;
     }
+
+    if (!_initialized) {
+      final detail = _initializationError;
+      onError(
+        detail == null
+            ? SpeechUnavailableException().userMessage
+            : userFriendlyError(detail, isWeb: kIsWeb),
+      );
+    }
+    return _initialized;
   }
 
-  /// Starts a new file-audio transcription session.
-  ///
-  /// [position] is read repeatedly so no player-specific types leak into the
-  /// service. Seeking is detected from a large position jump and also through
-  /// an explicit [seek] call.
-  Future<void> startTranscription({
-    required String mediaPath,
-    required Duration Function() position,
+  /// Starts (or resumes) listening and streams rolling caption text.
+  Future<void> startListening({
     required void Function(String text) onResult,
     required void Function(String message) onError,
-    required void Function(SpeechStatus status) onStatus,
+    void Function(SpeechStatus status)? onStatus,
   }) async {
     if (_disposed) {
       return;
     }
-    if (!_initialized || !_backend.isSupported) {
-      onError(const UnsupportedSpeechPlatformException().userMessage);
+    if (!_initialized) {
+      onError(SpeechUnavailableException().userMessage);
       return;
     }
 
-    await _stopCurrent(flush: false);
+    _onResult = onResult;
+    _onError = onError;
+    _onStatus = onStatus;
+    _shouldListen = true;
+    _restartAttempts = 0;
+    _consecutiveFailures = 0;
+    _cancelRestart();
+    _resetCaption();
+
+    if (_engine.isListening) {
+      onStatus?.call(SpeechStatus.listening);
+      return;
+    }
+    await _beginListening();
+  }
+
+  /// Stops the microphone without discarding the last caption.
+  ///
+  /// Call [startListening] to resume after a pause.
+  Future<void> pause() async {
+    if (_disposed || !_shouldListen) {
+      return;
+    }
+    _shouldListen = false;
+    _cancelRestart();
+    _generation += 1;
+    _commitPartial();
+    try {
+      await _engine.stop();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Stopping speech recognition failed: $error');
+      }
+    }
+    _onStatus?.call(SpeechStatus.paused);
+  }
+
+  /// Stops listening and clears the streaming callbacks.
+  Future<void> stop() async {
     if (_disposed) {
       return;
     }
-
-    _epoch += 1;
+    _shouldListen = false;
+    _cancelRestart();
     _generation += 1;
-    _active = true;
-    _resetPending = false;
-    _finalText = '';
-    _partialText = '';
-    _displayCallback = onResult;
-    _nextPosition = _safePosition(position);
-    onResult('');
-
-    _pumpFuture = _run(
-      generation: _generation,
-      epoch: _epoch,
-      mediaPath: mediaPath,
-      position: position,
-      onResult: onResult,
-      onError: onError,
-      onStatus: onStatus,
-    );
-  }
-
-  /// Stops recognition, flushes the final buffered audio, and clears handlers.
-  Future<void> stop() => _stopCurrent(flush: true);
-
-  /// Clears recognition state immediately after the player seeks.
-  void seek(Duration position) {
-    if (!_active || _disposed) {
-      return;
+    _commitPartial();
+    try {
+      await _engine.cancel();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Cancelling speech recognition failed: $error');
+      }
     }
-    _nextPosition = position;
-    _resetPending = true;
-    _finalText = '';
-    _partialText = '';
-    _displayCallback?.call('');
-    _signal();
+    _onResult = null;
+    _onError = null;
+    _onStatus = null;
+    _resetCaption(emit: false);
   }
 
   Future<void> dispose() async {
     if (_disposed) {
       return;
     }
+    await stop();
     _disposed = true;
-    await _stopCurrent(flush: false);
-    await _backend.dispose();
   }
 
-  static String statusMessage(SpeechStatus status) {
-    return switch (status) {
-      SpeechStatus.downloadingModel =>
-        'Downloading the offline speech model (about 40 MB, first run only)…',
-      SpeechStatus.loadingModel => 'Loading the offline speech model…',
-      SpeechStatus.extractingAudio => "Extracting this file's audio track…",
-      SpeechStatus.transcribing => 'Transcribing file audio on this device…',
-    };
-  }
-
-  static String userFriendlyError(Object error, {bool isWeb = false}) {
-    if (error is SpeechException) {
-      return error.userMessage;
+  /// Runs one recognition session. The recognizer may end it on silence or
+  /// after its maximum session length; [_scheduleRestart] renews it while
+  /// captions should stay on.
+  Future<void> _beginListening() async {
+    if (_disposed || !_shouldListen) {
+      return;
     }
-    if (isWeb) {
-      return const UnsupportedSpeechPlatformException().userMessage;
+    if (_starting) {
+      _scheduleRestart();
+      return;
     }
 
-    final message = error.toString().toLowerCase();
-    if (message.contains('socket') ||
-        message.contains('http') ||
-        message.contains('network') ||
-        message.contains('connection')) {
-      return const SpeechModelDownloadException().userMessage;
-    }
-    if (message.contains('ffmpeg') ||
-        message.contains('decode') ||
-        message.contains('audio')) {
-      return const MediaAudioExtractionException().userMessage;
-    }
-    if (message.contains('model') || message.contains('vosk')) {
-      return const SpeechModelException().userMessage;
-    }
-    if (message.contains('space') ||
-        message.contains('storage') ||
-        message.contains('enospc')) {
-      return 'The device does not have enough free storage for offline '
-          'captions. Free some space, then retry.';
-    }
-    return const SpeechRecognitionException().userMessage;
-  }
+    _starting = true;
+    final generation = _generation;
+    _onStatus?.call(SpeechStatus.listening);
 
-  static bool isNetworkError(String message) {
-    final normalized = message.toLowerCase();
-    return normalized.contains('network') ||
-        normalized.contains('socket') ||
-        normalized.contains('http');
-  }
-
-  Future<void> _run({
-    required int generation,
-    required int epoch,
-    required String mediaPath,
-    required Duration Function() position,
-    required void Function(String text) onResult,
-    required void Function(String message) onError,
-    required void Function(SpeechStatus status) onStatus,
-  }) async {
-    SpeechSession? session;
-    var activated = false;
     try {
-      onStatus(SpeechStatus.extractingAudio);
-      session = await _backend.createSession(mediaPath);
-      if (!_isCurrent(generation)) {
-        await session.dispose();
-        session = null;
+      await _engine.listen(
+        onResult: (words, isFinal) {
+          if (_disposed || !_shouldListen || generation != _generation) {
+            return;
+          }
+          _handleResult(words, isFinal);
+        },
+        listenFor: listenFor,
+        pauseFor: pauseFor,
+      );
+      _consecutiveFailures = 0;
+    } catch (error) {
+      if (_disposed || !_shouldListen || generation != _generation) {
         return;
       }
-
-      activated = true;
-      _nextPosition = _safePosition(position);
-      var lastObserved = _nextPosition;
-      onStatus(SpeechStatus.transcribing);
-
-      while (_isCurrent(generation)) {
-        final current = _safePosition(position);
-        if ((current - lastObserved).abs() > _seekThreshold) {
-          _nextPosition = current;
-          _finalText = '';
-          _partialText = '';
-          await session.reset();
-          if (!_isCurrent(generation)) {
-            break;
-          }
-          _emit('', epoch, onResult);
-        }
-        lastObserved = current;
-
-        if (_resetPending) {
-          _resetPending = false;
-          _nextPosition = current;
-          _finalText = '';
-          _partialText = '';
-          await session.reset();
-          if (!_isCurrent(generation)) {
-            break;
-          }
-          _emit('', epoch, onResult);
-        }
-
-        final available = current - _captionLatency;
-        if (_nextPosition >= available) {
-          await _waitForTick();
-          continue;
-        }
-
-        var chunk = available - _nextPosition;
-        if (chunk > _maximumChunk) {
-          chunk = _maximumChunk;
-        }
-        if (chunk < _minimumChunk) {
-          await _waitForTick();
-          continue;
-        }
-
-        final pcm = await session.read(_nextPosition, chunk);
-        if (!_isCurrent(generation)) {
-          break;
-        }
-        if (pcm.isEmpty) {
-          await _waitForTick();
-          continue;
-        }
-
-        _nextPosition += session.durationForBytes(pcm.length);
-        final update = await session.accept(pcm);
-        if (!_isCurrent(generation)) {
-          break;
-        }
-        if (_resetPending) {
-          continue;
-        }
-        _apply(update, epoch, onResult);
+      _consecutiveFailures += 1;
+      if (_consecutiveFailures >= _maximumConsecutiveFailures) {
+        _shouldListen = false;
+        _onError?.call(SpeechRecognitionException(cause: error).userMessage);
+        _onStatus?.call(SpeechStatus.paused);
+        return;
       }
-    } catch (error) {
-      if (_isCurrent(generation)) {
-        _active = false;
-        _displayCallback = null;
-        onError(userFriendlyError(error));
-      }
+      _scheduleRestart();
     } finally {
-      if (_flushOnStop && activated && session != null) {
-        try {
-          await _drainRemaining(session, position, epoch, onResult);
-          _apply(await session.finish(), epoch, onResult);
-        } catch (_) {
-          // Stopping is best-effort; the last caption remains visible.
-        }
-      }
-      await session?.dispose();
+      _starting = false;
     }
   }
 
-  Future<void> _drainRemaining(
-    SpeechSession session,
-    Duration Function() position,
-    int epoch,
-    void Function(String text) onResult,
-  ) async {
-    final current = _safePosition(position);
-    while (_nextPosition < current) {
-      var chunk = current - _nextPosition;
-      if (chunk > _maximumChunk) {
-        chunk = _maximumChunk;
-      }
-      if (chunk < const Duration(milliseconds: 20)) {
-        break;
-      }
-      final pcm = await session.read(_nextPosition, chunk);
-      if (pcm.isEmpty) {
-        break;
-      }
-      _nextPosition += session.durationForBytes(pcm.length);
-      _apply(await session.accept(pcm), epoch, onResult);
-    }
-  }
-
-  void _apply(
-    SpeechUpdate update,
-    int epoch,
-    void Function(String text) onResult,
-  ) {
-    if (epoch != _epoch || _disposed) {
+  void _handleEngineStatus(SpeechEngineStatus status) {
+    if (_disposed) {
       return;
     }
-    if (update.finalText.trim().isNotEmpty) {
-      _finalText = _tailWords('$_finalText ${update.finalText}', 40);
+    if (status == SpeechEngineStatus.listening) {
+      if (_shouldListen) {
+        _restartAttempts = 0;
+        _onStatus?.call(SpeechStatus.listening);
+      }
+      return;
+    }
+    if (!_shouldListen) {
+      return;
+    }
+    _scheduleRestart();
+  }
+
+  /// Renews the recognition session with a short, capped backoff so a burst of
+  /// status events cannot spin up duplicate sessions.
+  void _scheduleRestart() {
+    if (_disposed || !_shouldListen || _restartTimer != null) {
+      return;
+    }
+    final exponent = math.min(_restartAttempts, 5);
+    final delay = _backoffDelay(exponent);
+    _restartAttempts += 1;
+    _restartTimer = Timer(delay, () {
+      _restartTimer = null;
+      _beginListening();
+    });
+  }
+
+  Duration _backoffDelay(int exponent) {
+    final delay = initialRestartDelay * (1 << exponent);
+    return delay > maximumRestartDelay ? maximumRestartDelay : delay;
+  }
+
+  void _cancelRestart() {
+    _restartTimer?.cancel();
+    _restartTimer = null;
+  }
+
+  void _handleResult(String words, bool isFinal) {
+    final normalized = _normalize(words);
+    if (isFinal) {
       _partialText = '';
-      _emit(_composeCaption(), epoch, onResult);
-    } else if (update.partialText.trim().isNotEmpty) {
-      _partialText = update.partialText.trim();
-      _emit(_composeCaption(), epoch, onResult);
+      _commitWords(normalized);
+      _consecutiveFailures = 0;
+      _restartAttempts = 0;
+    } else {
+      _partialText = normalized;
     }
+    _emitCaption();
   }
 
-  String _composeCaption() => _tailWords('$_finalText $_partialText', 32);
-
-  static String _tailWords(String text, int maximumWords) {
-    final words = text
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((word) => word.isNotEmpty)
-        .toList(growable: false);
-    if (words.length <= maximumWords) {
-      return words.join(' ');
-    }
-    return words.sublist(words.length - maximumWords).join(' ');
-  }
-
-  void _emit(String text, int epoch, void Function(String text) onResult) {
-    if (epoch != _epoch || _disposed) {
+  /// Moves the interim phrase into the committed caption. Keeping committed
+  /// words means a new recognition session continues the same caption instead
+  /// of starting every phrase from an empty line.
+  void _commitWords(String words) {
+    if (words.isEmpty) {
       return;
     }
-    onResult(text);
+    final combined = <String>[
+      ..._committedText.split(' ').where((word) => word.isNotEmpty),
+      ...words.split(' ').where((word) => word.isNotEmpty),
+    ];
+    final start = math.max(0, combined.length - _maximumCommittedWords);
+    _committedText = combined.sublist(start).join(' ');
   }
 
-  Future<void> _stopCurrent({required bool flush}) async {
-    _flushOnStop = flush;
-    _active = false;
-    _generation += 1;
-    _resetPending = false;
-    _signal();
-
-    final pump = _pumpFuture;
-    _pumpFuture = null;
-    if (pump != null) {
-      try {
-        await pump;
-      } catch (_) {
-        // The pump reports its own failures through onError.
-      }
-    }
-    _flushOnStop = false;
-    _displayCallback = null;
-  }
-
-  Future<void> _waitForTick() async {
-    if (!_active || _disposed) {
+  void _commitPartial() {
+    final partial = _partialText;
+    _partialText = '';
+    if (partial.isEmpty) {
       return;
     }
-    final wake = Completer<void>();
-    _wake = wake;
-    try {
-      await Future.any<void>([
-        wake.future,
-        Future<void>.delayed(_pollInterval),
-      ]);
-    } finally {
-      if (identical(_wake, wake)) {
-        _wake = null;
-      }
+    _commitWords(partial);
+    _emitCaption();
+  }
+
+  void _emitCaption() {
+    final builder = <String>[
+      if (_committedText.isNotEmpty) _committedText,
+      if (_partialText.isNotEmpty) _partialText,
+    ];
+    final words = builder.join(' ').split(' ').where((word) => word.isNotEmpty);
+    final visible = words.length > _maximumCaptionWords
+        ? words.skip(words.length - _maximumCaptionWords).join(' ')
+        : words.join(' ');
+    if (visible == _lastCaption) {
+      return;
+    }
+    _lastCaption = visible;
+    _onResult?.call(visible);
+  }
+
+  void _resetCaption({bool emit = true}) {
+    _committedText = '';
+    _partialText = '';
+    _lastCaption = '';
+    if (emit) {
+      _onResult?.call('');
     }
   }
 
-  void _signal() {
-    final wake = _wake;
-    if (wake != null && !wake.isCompleted) {
-      wake.complete();
-    }
-    _wake = null;
-  }
+  static String _normalize(String value) =>
+      value.replaceAll(RegExp(r'\s+'), ' ').trim();
+}
 
-  bool _isCurrent(int generation) {
-    return _active && !_disposed && _generation == generation;
+/// Maps raw platform recognizer errors to wording a user can act on.
+String userFriendlyError(String detail, {bool isWeb = kIsWeb}) {
+  final message = detail.toLowerCase();
+  if (message.contains('permission') ||
+      message.contains('not-allowed') ||
+      message.contains('denied') ||
+      message.contains('microphone')) {
+    return SpeechPermissionException(isWeb: isWeb).userMessage;
   }
-
-  static Duration _safePosition(Duration Function() position) {
-    try {
-      final value = position();
-      return value < Duration.zero ? Duration.zero : value;
-    } catch (_) {
-      return Duration.zero;
-    }
+  if (message.contains('network')) {
+    return 'Live captions need a network connection for speech recognition. '
+        'Reconnect, then retry captions.';
   }
+  if (message.contains('no speech') ||
+      message.contains('no_match') ||
+      message.contains('speech_timeout')) {
+    return 'No speech was recognized yet. Keep playback audible and speak '
+        'clearly near the device, then retry captions.';
+  }
+  if (message.contains('busy')) {
+    return 'Speech recognition is busy with another app. Close it, then retry '
+        'captions.';
+  }
+  if (message.contains('audio')) {
+    return 'The microphone is unavailable. Check that no other app is using '
+        'it, then retry captions.';
+  }
+  return SpeechRecognitionException().userMessage;
 }

@@ -32,8 +32,4 @@ abstract final class AppConfig {
   static const activationHost = 'activate';
 
   static const supportEmail = 'support@stackbuildco.com';
-
-  /// The compact English Vosk model downloaded on first use and cached locally.
-  static const speechModelUrl =
-      'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip';
 }

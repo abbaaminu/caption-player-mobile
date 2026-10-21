@@ -9,7 +9,6 @@ import '../config/app_config.dart';
 import '../services/activation_link_service.dart';
 import '../services/api_service.dart';
 import '../services/media_picker_service.dart';
-import '../services/speech_backend.dart';
 import '../services/speech_service.dart';
 import '../services/storage_service.dart';
 import '../services/video_controller_factory.dart';
@@ -17,6 +16,7 @@ import '../theme/app_theme.dart';
 import '../utils/activation_link.dart';
 import '../utils/media_format.dart';
 import '../widgets/audio_player_card.dart';
+import '../widgets/caption_audio_guide.dart';
 import '../widgets/caption_overlay.dart';
 import '../widgets/empty_player_view.dart';
 import '../widgets/player_controls.dart';
@@ -77,7 +77,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isLoadingMedia = false;
   bool _isAudioTrack = false;
   String? _mediaTitle;
-  String? _mediaPath;
   String? _playerError;
   bool _showCaptionRecoveryActions = false;
   String? _lastVideoError;
@@ -87,6 +86,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _captionsReady = false;
   bool _isTranscribing = false;
   bool _isPreparingCaptions = false;
+  bool _showCaptionGuide = true;
   String _captionStatus = '';
   String _captionsText = '';
 
@@ -486,8 +486,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return 'Free trial · $bounded min left';
   }
 
+  /// Web speech recognition only works in a secure context.
+  bool get _canUseMicrophone =>
+      !kIsWeb ||
+      Uri.base.scheme == 'https' ||
+      Uri.base.host == 'localhost' ||
+      Uri.base.host == '127.0.0.1';
+
   Future<void> _enableCaptions() async {
-    if (_isPreparingCaptions) {
+    if (_isPreparingCaptions || _showPaywall) {
+      return;
+    }
+    if (!_canUseMicrophone) {
+      _setCaptionError(
+        'Live captions need HTTPS or localhost. Open this app over a secure '
+        'connection, then retry captions.',
+        canRetry: false,
+      );
       return;
     }
     if (!_speechService.isSupported) {
@@ -506,7 +521,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     try {
       final available = await _speechService.initialize(
-        onError: (message) => _setCaptionError(message),
+        onError: _handleCaptionError,
         onStatus: _handleSpeechStatus,
       );
       if (!mounted) {
@@ -514,11 +529,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       if (!available) {
         if (_playerError == null) {
-          _setCaptionError(
-            const SpeechRecognitionException(
-              cause: 'The speech backend did not initialize.',
-            ).userMessage,
-          );
+          _setCaptionError(const SpeechUnavailableException().userMessage);
         }
         return;
       }
@@ -526,18 +537,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {
         _captionsReady = true;
         _captionsEnabled = true;
+        _showCaptionGuide = true;
         _playerError = null;
         _showCaptionRecoveryActions = false;
       });
 
-      if (_videoController?.value.isInitialized ?? false) {
-        await _startCaptioning();
+      final controller = _videoController;
+      if (controller != null && controller.value.isInitialized) {
+        if (controller.value.isPlaying) {
+          await _startCaptioning();
+        } else {
+          setState(() => _captionStatus = 'Captions start with playback');
+        }
       }
     } catch (error) {
       if (kDebugMode) {
-        debugPrint('Enabling on-device captions failed: $error');
+        debugPrint('Enabling live captions failed: $error');
       }
-      _setCaptionError(SpeechService.userFriendlyError(error, isWeb: kIsWeb));
+      _setCaptionError(
+        error is SpeechException
+            ? error.userMessage
+            : SpeechRecognitionException(cause: error).userMessage,
+      );
     } finally {
       if (mounted) {
         setState(() => _isPreparingCaptions = false);
@@ -547,31 +568,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _startCaptioning() async {
     final controller = _videoController;
-    final path = _mediaPath;
     if (!_captionsReady ||
         !_captionsEnabled ||
         _showPaywall ||
         controller == null ||
         !controller.value.isInitialized ||
-        path == null ||
-        path.isEmpty ||
+        !controller.value.isPlaying ||
         _speechService.isActive) {
       return;
     }
 
     setState(() {
       _isTranscribing = true;
-      _captionStatus = SpeechService.statusMessage(
-        SpeechStatus.extractingAudio,
-      );
+      _captionStatus = SpeechService.statusMessage(SpeechStatus.preparing);
     });
-    await _speechService.startTranscription(
-      mediaPath: path,
-      position: () => _videoController?.value.position ?? Duration.zero,
+    await _speechService.startListening(
       onResult: _handleCaptionText,
       onError: _handleCaptionError,
       onStatus: _handleSpeechStatus,
     );
+  }
+
+  /// Stops the microphone while preserving the last caption line. Called when
+  /// playback pauses so captions resume with the video.
+  Future<void> _pauseCaptioning() async {
+    if (!_captionsEnabled) {
+      return;
+    }
+    try {
+      await _speechService.pause();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Pausing live captions failed: $error');
+      }
+    }
+    if (mounted) {
+      setState(() => _isTranscribing = false);
+    }
   }
 
   Future<void> _stopCaptioning() async {
@@ -579,7 +612,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _speechService.stop();
     } catch (error) {
       if (kDebugMode) {
-        debugPrint('Stopping on-device captions failed: $error');
+        debugPrint('Stopping live captions failed: $error');
       }
     }
     if (mounted) {
@@ -617,15 +650,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     setState(() {
       _captionStatus = SpeechService.statusMessage(status);
-      if (status == SpeechStatus.transcribing) {
+      if (status == SpeechStatus.listening) {
         _isTranscribing = true;
+      } else if (status == SpeechStatus.paused) {
+        _isTranscribing = false;
       }
     });
   }
 
   void _handleCaptionError(String message) {
     if (kDebugMode) {
-      debugPrint('On-device caption error: $message');
+      debugPrint('Live caption error: $message');
     }
     _setCaptionError(message);
   }
@@ -639,9 +674,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _captionsEnabled = false;
       _isTranscribing = false;
       _captionStatus = '';
+      _showCaptionGuide = false;
       _showCaptionRecoveryActions = canRetry;
       _playerError = message;
     });
+    unawaited(_speechService.stop());
+  }
+
+  void _dismissCaptionGuide() {
+    setState(() => _showCaptionGuide = false);
   }
 
   void _dismissPlayerError() {
@@ -683,7 +724,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _videoController = newController;
         _isAudioTrack = isAudioMediaExtension(file.extension);
         _mediaTitle = file.name;
-        _mediaPath = file.path;
         _captionsText = '';
         _captionStatus = '';
         _wasCompleted = false;
@@ -758,7 +798,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     if (value.isCompleted && !_wasCompleted) {
       _wasCompleted = true;
-      unawaited(_stopCaptioning());
+      unawaited(_pauseCaptioning());
       setState(() => _isTranscribing = false);
       return;
     }
@@ -778,7 +818,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       if (controller.value.isPlaying) {
         await controller.pause();
-        // Keep the recognizer alive so resuming continues from the same audio.
+        await _pauseCaptioning();
       } else {
         if (controller.value.isCompleted) {
           await controller.seekTo(Duration.zero);
@@ -836,7 +876,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     try {
       await controller.seekTo(clamped);
-      _speechService.seek(clamped);
     } catch (error) {
       if (kDebugMode) {
         debugPrint('Seek failed: $error');
@@ -883,6 +922,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 child: Column(
                   children: [
                     Expanded(child: _buildMediaArea()),
+                    if (_captionsEnabled &&
+                        _showCaptionGuide &&
+                        !_showPaywall &&
+                        !_isInitializing &&
+                        _startupError == null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 760),
+                            child: CaptionAudioGuide(
+                              isWeb: kIsWeb,
+                              onDismiss: _dismissCaptionGuide,
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!_isInitializing && _startupError == null)
                       PlayerControls(
                         position: Duration(milliseconds: positionMs.round()),
@@ -966,8 +1022,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 liveRegion: true,
                 label: _captionStatus.isEmpty
                     ? (_isTranscribing
-                          ? 'On-device captions are active'
-                          : 'Preparing on-device captions')
+                          ? 'Live captions are active'
+                          : 'Preparing live captions')
                     : _captionStatus,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
@@ -994,7 +1050,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        _isTranscribing ? 'ON-DEVICE' : 'PREPARING',
+                        _isTranscribing ? 'LIVE' : 'PREPARING',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: AppTheme.accent,
                           fontWeight: FontWeight.w700,
