@@ -16,6 +16,7 @@ import '../services/video_controller_factory.dart';
 import '../theme/app_theme.dart';
 import '../utils/activation_link.dart';
 import '../utils/media_format.dart';
+import '../utils/web_origin.dart';
 import '../widgets/audio_player_card.dart';
 import '../widgets/caption_audio_guide.dart';
 import '../widgets/caption_overlay.dart';
@@ -136,6 +137,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _initializeApp() async {
+    // Show the UI immediately so the user sees the player controls without
+    // waiting for platform storage (e.g. FlutterSecureStorage key generation on
+    // Android, which can take several seconds on first launch).
+    if (mounted) {
+      setState(() => _isInitializing = false);
+    }
+
     try {
       final savedTime = await _storageService.loadSavedTime();
       final cachedLicense = await _storageService.loadLicense();
@@ -144,7 +152,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       _lastSavedTrialMs = savedTime;
       setState(() {
-        _isInitializing = false;
         _startupError = null;
         _startupErrorDetails = null;
         _watchTimeMs = savedTime.toDouble();
@@ -171,7 +178,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return;
       }
       setState(() {
-        _isInitializing = false;
         _startupError = kIsWeb
             ? 'Could not load your saved session. The browser may be '
                   'blocking site storage for this app.'
@@ -518,11 +524,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   /// WebAssembly captions require a secure context.
-  bool get _canUseWebCaptions =>
-      !kIsWeb ||
-      Uri.base.scheme == 'https' ||
-      Uri.base.host == 'localhost' ||
-      Uri.base.host == '127.0.0.1';
+  bool get _canUseWebCaptions => isSecureWebOrigin(Uri.base);
 
   Future<void> _enableCaptions() async {
     if (_isPreparingCaptions || _showPaywall) {
@@ -580,8 +582,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         if (controller.value.isPlaying) {
           await _startCaptioning();
         } else {
-          setState(() => _captionStatus = 'Captions start with playback');
+          setState(() {
+            _captionStatus = 'Captions start with playback';
+            _isTranscribing = true;
+          });
         }
+      } else {
+        setState(() {
+          _captionStatus = 'Captions ready — open a media file';
+          _isTranscribing = true;
+        });
       }
     } catch (error) {
       if (kDebugMode) {
@@ -763,7 +773,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       final MediaAudioSource audioSource;
       try {
-        audioSource = await createMediaAudioSource(file);
+        audioSource = await createMediaAudioSource(file).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () => throw TimeoutException(
+            'Decoding the media audio track took longer than 15 seconds.',
+          ),
+        );
       } catch (error) {
         if (kDebugMode) {
           debugPrint('Preparing the media audio track failed: $error');
@@ -1180,6 +1195,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     if (_isTranscribing) {
       return 'Listening for speech…';
+    }
+    // Show status set by outside callers (e.g. 'Captions start with playback')
+    // so the caption bar stays visible even before transcription begins.
+    if (_captionStatus.isNotEmpty) {
+      return _captionStatus;
     }
     return '';
   }
