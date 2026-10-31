@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>probe</title></head>
+<body><pre id="out">starting…</pre>
+<script>
+const out = document.getElementById('out');
+// Writes one line into the probe page, which is dumped with --dump-dom when
+// the headless browser exits.
+function log(message) {
+  out.textContent += '\n' + message;
+  console.log(message);
+}
+const ASSETS = 'assets/packages/flutter_whisper_ggml/assets/web';
+const MODEL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin';
+
+function request(worker, command, payload, onEvent) {
+  return new Promise((resolve, reject) => {
+    const id = Math.floor(Math.random() * 1e9);
+    const handler = (event) => {
+      const data = event.data;
+      if (!data || data.id !== id) return;
+      if (data.event) {
+        if (onEvent) onEvent(data);
+        return;
+      }
+      worker.removeEventListener('message', handler);
+      if (data.ok) resolve(data); else reject(new Error(data.error));
+    };
+    worker.addEventListener('message', handler);
+    worker.postMessage({ id, command, ...payload });
+  });
+}
+
+async function decodeTo16k(url) {
+  const response = await fetch(url);
+  const data = await response.arrayBuffer();
+  const context = new AudioContext();
+  const decoded = await context.decodeAudioData(data);
+  const channels = [];
+  for (let c = 0; c < decoded.numberOfChannels; c++) {
+    channels.push(decoded.getChannelData(c));
+  }
+  const step = decoded.sampleRate / 16000;
+  const length = Math.ceil(decoded.duration * 16000);
+  const output = new Float32Array(length);
+  const last = channels[0].length - 1;
+  for (let i = 0; i < length; i++) {
+    const position = i * step;
+    const base = Math.min(Math.floor(position), last);
+    const next = Math.min(base + 1, last);
+    const fraction = position - base;
+    let mixed = 0;
+    for (const channel of channels) {
+      mixed += channel[base] + (channel[next] - channel[base]) * fraction;
+    }
+    output[i] = Math.max(-1, Math.min(1, mixed / channels.length));
+  }
+  await context.close();
+  return {
+    samples: output,
+    sampleRate: decoded.sampleRate,
+    channels: channels.length,
+    duration: decoded.duration,
+  };
+}
+
+(async () => {
+  try {
+    log('crossOriginIsolated=' + self.crossOriginIsolated);
+    const audio = await decodeTo16k('probe.wav');
+    let peak = 0;
+    let energy = 0;
+    for (const value of audio.samples) {
+      const magnitude = Math.abs(value);
+      if (magnitude > peak) peak = magnitude;
+      energy += value * value;
+    }
+    log('decoded rate=' + audio.sampleRate + ' channels=' + audio.channels
+      + ' duration=' + audio.duration.toFixed(2)
+      + ' samples=' + audio.samples.length
+      + ' peak=' + peak.toFixed(4)
+      + ' rms=' + Math.sqrt(energy / audio.samples.length).toFixed(4));
+
+    const worker = new Worker(ASSETS + '/flutter_whisper_worker.js');
+    worker.addEventListener('error', (event) => log('worker error: ' + (event.message || event)));
+    const started = performance.now();
+    await request(worker, 'init', {
+      modelUrl: MODEL,
+      moduleUrl: new URL(ASSETS + '/flutter_whisper.js', location.href).href,
+      useGpu: false,
+      gpuDevice: 0,
+      flashAttention: false,
+    }, (data) => {
+      if (data.progress % 25 === 0) log('model ' + data.progress + '%');
+    });
+    log('init ok in ' + Math.round(performance.now() - started) + 'ms');
+
+    function slice(startSeconds, lengthSeconds) {
+      const from = Math.max(0, Math.floor(startSeconds * 16000));
+      const to = Math.min(audio.samples.length, from + Math.round(lengthSeconds * 16000));
+      return audio.samples.slice(from, to);
+    }
+
+    const configs = [
+      { name: 'app', config: { language: 'auto', threads: 2, noContext: true } },
+      { name: 'en-1-thread', config: { language: 'en', threads: 1, noContext: false } },
+      { name: 'en-4-thread', config: { language: 'en', threads: 4, noContext: true } },
+    ];
+    const samples = slice(0, Math.min(5, audio.duration));
+    let energy = 0;
+    for (const value of samples) energy += value * value;
+    log('probe window samples=' + samples.length
+      + ' rms=' + Math.sqrt(energy / samples.length).toFixed(4));
+
+    for (const { name, config } of configs) {
+      const windowStarted = performance.now();
+      try {
+        const response = await request(worker, 'transcribe', {
+          samples,
+          config: {
+            translate: false,
+            tokenTimestamps: false,
+            singleSegment: false,
+            initialPrompt: '',
+            temperature: 0,
+            ...config,
+          },
+        });
+        const raw = response.result;
+        log('[' + name + '] ' + Math.round(performance.now() - windowStarted)
+          + 'ms raw=' + String(raw).slice(0, 1200));
+      } catch (error) {
+        log('[' + name + '] FAILED: ' + (error && error.message ? error.message : String(error)));
+      }
+    }
+    log('DONE');
+  } catch (error) {
+    log('FAILED: ' + (error && error.message ? error.message : String(error)));
+  }
+})();
+</script>
+
+
+</body></html>

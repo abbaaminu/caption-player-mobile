@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>probe chunk</title></head>
+<body><pre id="out">starting</pre>
+<script>
+// Measures whether long windows are cheaper per second of audio than short
+// ones. whisper.cpp encodes up to thirty seconds per pass, so a short window
+// can pay the whole encoder cost for very little audio.
+const out = document.getElementById('out');
+function log(message) {
+  out.textContent += '\n' + message;
+  console.log(message);
+}
+const ASSETS = 'assets/packages/flutter_whisper_ggml/assets/web';
+const MODEL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin';
+
+function request(worker, command, payload, onEvent) {
+  return new Promise((resolve, reject) => {
+    const id = Math.floor(Math.random() * 1e9);
+    const handler = (event) => {
+      const data = event.data;
+      if (!data || data.id !== id) return;
+      if (data.event) {
+        if (onEvent) onEvent(data);
+        return;
+      }
+      worker.removeEventListener('message', handler);
+      if (data.ok) resolve(data); else reject(new Error(data.error));
+    };
+    worker.addEventListener('message', handler);
+    worker.postMessage({ id, command, ...payload });
+  });
+}
+
+async function decodeTo16k(url) {
+  const response = await fetch(url);
+  const data = await response.arrayBuffer();
+  const context = new AudioContext();
+  const decoded = await context.decodeAudioData(data);
+  const channels = [];
+  for (let c = 0; c < decoded.numberOfChannels; c++) {
+    channels.push(decoded.getChannelData(c));
+  }
+  const step = decoded.sampleRate / 16000;
+  const length = Math.ceil(decoded.duration * 16000);
+  const output = new Float32Array(length);
+  const last = channels[0].length - 1;
+  for (let i = 0; i < length; i++) {
+    const position = i * step;
+    const base = Math.min(Math.floor(position), last);
+    const next = Math.min(base + 1, last);
+    const fraction = position - base;
+    let mixed = 0;
+    for (const channel of channels) {
+      mixed += channel[base] + (channel[next] - channel[base]) * fraction;
+    }
+    output[i] = Math.max(-1, Math.min(1, mixed / channels.length));
+  }
+  await context.close();
+  return { samples: output, duration: decoded.duration };
+}
+
+// Repeats the decoded speech until it fills [seconds] of audio so long windows
+// can be measured with speech throughout.
+function fill(samples, seconds) {
+  const wanted = Math.round(seconds * 16000);
+  const output = new Float32Array(wanted);
+  for (let offset = 0; offset < wanted; offset += samples.length) {
+    output.set(samples.subarray(0, Math.min(samples.length, wanted - offset)), offset);
+  }
+  return output;
+}
+
+(async () => {
+  try {
+    const audio = await decodeTo16k('probe.wav');
+    log('decoded duration=' + audio.duration.toFixed(2));
+
+    const worker = new Worker(ASSETS + '/flutter_whisper_worker.js');
+    worker.addEventListener('error', (event) => log('worker error: ' + (event.message || event)));
+    const started = performance.now();
+    await request(worker, 'init', {
+      modelUrl: MODEL,
+      moduleUrl: new URL(ASSETS + '/flutter_whisper.js', location.href).href,
+      useGpu: false,
+      gpuDevice: 0,
+      flashAttention: false,
+    });
+    log('init ok in ' + Math.round(performance.now() - started) + 'ms');
+
+    const cases = [15, 30, 60];
+    for (const seconds of cases) {
+      const samples = fill(audio.samples, seconds);
+      const caseStarted = performance.now();
+      try {
+        const response = await request(worker, 'transcribe', {
+          samples,
+          config: {
+            language: 'en',
+            translate: false,
+            threads: 2,
+            tokenTimestamps: false,
+            noContext: true,
+            singleSegment: false,
+            initialPrompt: '',
+            temperature: 0,
+          },
+        });
+        const elapsed = Math.round(performance.now() - caseStarted);
+        const parsed = JSON.parse(response.result || '{}');
+        const segments = parsed.segments || [];
+        log('[' + seconds + 's] ' + elapsed + 'ms ('
+          + (elapsed / 1000 / seconds).toFixed(2) + 'x realtime) segments='
+          + segments.length + ' lastEnd='
+          + (segments.length ? segments[segments.length - 1].end : 'n/a'));
+      } catch (error) {
+        log('[' + seconds + 's] FAILED: ' + (error && error.message ? error.message : String(error)));
+      }
+    }
+    log('DONE');
+  } catch (error) {
+    log('FAILED: ' + (error && error.message ? error.message : String(error)));
+  }
+})();
+</script>
+</body>
+</html>

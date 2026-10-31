@@ -1,0 +1,15 @@
+﻿powershell : At C:\Users\ABBA AMINU\premiumcaption_player\tool\probe\run_probe.ps1:190 char:1
+At line:1 char:1
++ powershell -ExecutionPolicy Bypass -File '.\tool\probe\run_probe.ps1' ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (At C:\Users\ABB....ps1:190 char:1:String) [], Re 
+   moteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
++ } -ArgumentList (Join-Path $root 'tool\serve_web.ps1'), $Port
++ ~
+Unexpected token '}' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : UnexpectedToken
+ 
+

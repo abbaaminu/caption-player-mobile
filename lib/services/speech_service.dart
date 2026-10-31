@@ -74,8 +74,10 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
   /// A window shorter than this cannot be transcribed reliably.
   static const _minimumWindow = Duration(seconds: 2);
 
-  /// Windows of pure silence that clear the caption line.
-  static const _silentWindowsBeforeClearing = 2;
+  /// Windows of pure silence that clear the caption line. Three windows keep a
+  /// finished sentence on screen for about six seconds, matching how the system
+  /// caption bar holds its text instead of flickering between sentences.
+  static const _silentWindowsBeforeClearing = 3;
   static const _maximumTranscriptionFailures = 3;
 
   /// Slack between the playhead and the wall clock before a window is treated
@@ -151,9 +153,13 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
       );
       return true;
     } catch (error) {
+      // Keeping the underlying reason in the banner lets a viewer tell a failed
+      // download from an unsupported device, which used to look identical.
+      final reason = _shortErrorReason(error);
       onError(
-        'Could not prepare the on-device caption model. Check your connection '
-        'for its first download, then retry captions.',
+        'Could not prepare the on-device caption model'
+        '${reason.isEmpty ? '' : ' ($reason)'}. Check your connection for its '
+        'first download, then retry captions.',
         true,
       );
       if (kDebugMode) {
@@ -161,6 +167,15 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
       }
       return false;
     }
+  }
+
+  /// Condenses a platform error into a short clause for the caption banner.
+  static String _shortErrorReason(Object error) {
+    final raw = error.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (raw.isEmpty) {
+      return '';
+    }
+    return raw.length <= 120 ? raw : '${raw.substring(0, 117)}…';
   }
 
   @override
@@ -248,6 +263,13 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
         return;
       }
       final transcript = cleanTranscript(result.text);
+      if (kDebugMode) {
+        debugPrint(
+          'Caption window ${start.inMilliseconds}ms+${window.inMilliseconds}ms '
+          '(${samples.length} samples) -> '
+          '${transcript.isEmpty ? '<silence>' : transcript}',
+        );
+      }
       if (transcript.isEmpty) {
         _reportSilence(generation);
         return;
@@ -256,6 +278,16 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
       _onResult?.call(transcript, false);
     } catch (error) {
       if (!_isListening || generation != _transcriptionGeneration) {
+        return;
+      }
+      // A window past the end of the audio track (or inside a gap) is ordinary
+      // silence, not a broken decoder. Counting it as a failure used to switch
+      // captioning off for the rest of the file.
+      if (_isUnreadableRange(error)) {
+        if (kDebugMode) {
+          debugPrint('Caption audio window was empty: $error');
+        }
+        _reportSilence(generation);
         return;
       }
       _transcriptionFailures += 1;
@@ -303,6 +335,16 @@ class LocalWhisperRecognitionEngine implements SpeechRecognitionEngine {
     }
     final elapsed = _now().difference(startedAt);
     return current - initialPosition > elapsed + _playheadJumpTolerance;
+  }
+
+  /// True when the failure only means "there is no audio in this range".
+  ///
+  /// The native decoders report a range without audio as an error; that is a
+  /// silent stretch of the timeline, not a decoder that cannot be trusted.
+  static bool _isUnreadableRange(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('no audio') ||
+        message.contains('invalid audio range');
   }
 
   Future<void> _stopCapture() async {
@@ -714,6 +756,14 @@ class SpeechService {
 
   void _handleResult(String words, bool isFinal) {
     final normalized = _normalize(words);
+    if (normalized.isEmpty && !isFinal) {
+      // Sustained silence clears the line, so the next phrase starts a fresh
+      // caption instead of bringing the previous one back with it.
+      _partialText = '';
+      _committedText = '';
+      _emitCaption();
+      return;
+    }
     if (isFinal) {
       _partialText = '';
       _commitWords(normalized);
@@ -725,20 +775,68 @@ class SpeechService {
     _emitCaption();
   }
 
-  /// Moves the interim phrase into the committed caption. Keeping committed
-  /// words means a new recognition session continues the same caption instead
-  /// of starting every phrase from an empty line.
+  /// Moves an interim phrase into the committed caption.
+  ///
+  /// Consecutive transcription windows overlap by a few seconds of audio, so a
+  /// new phrase usually repeats the end of the line that is already on screen.
+  /// Only the words past that overlap are added, which stops the caption from
+  /// repeating itself every couple of seconds.
   void _commitWords(String words) {
-    if (words.isEmpty) {
+    final incoming = words.split(' ').where((word) => word.isNotEmpty).toList();
+    if (incoming.isEmpty) {
       return;
     }
-    final combined = <String>[
-      ..._committedText.split(' ').where((word) => word.isNotEmpty),
-      ...words.split(' ').where((word) => word.isNotEmpty),
-    ];
+    final committed = _committedText
+        .split(' ')
+        .where((word) => word.isNotEmpty)
+        .toList();
+    final repeated = _overlapWordCount(committed, incoming);
+    final combined = <String>[...committed, ...incoming.skip(repeated)];
     final start = math.max(0, combined.length - _maximumCommittedWords);
     _committedText = combined.sublist(start).join(' ');
   }
+
+  /// Number of words at the end of [committed] that repeat the start of
+  /// [incoming].
+  ///
+  /// One repeated word is ignored because short words such as "the" or "and"
+  /// recur naturally in connected speech.
+  static int _overlapWordCount(List<String> committed, List<String> incoming) {
+    final limit = math.min(math.min(committed.length, incoming.length), 24);
+    for (var count = limit; count >= 2; count--) {
+      var matches = true;
+      for (var offset = 0; offset < count; offset++) {
+        if (!_sameCaptionWord(
+          committed[committed.length - count + offset],
+          incoming[offset],
+        )) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        return count;
+      }
+    }
+    return 0;
+  }
+
+  /// Compares two caption words ignoring case and punctuation.
+  static bool _sameCaptionWord(String first, String second) {
+    String normalize(String value) =>
+        value.toLowerCase().replaceAll(_wordPunctuation, '');
+    final a = normalize(first);
+    final b = normalize(second);
+    if (a.isEmpty || b.isEmpty) {
+      return false;
+    }
+    return a == b;
+  }
+
+  static final RegExp _wordPunctuation = RegExp(
+    r'[^\p{L}\p{N}]',
+    unicode: true,
+  );
 
   void _commitPartial() {
     final partial = _partialText;

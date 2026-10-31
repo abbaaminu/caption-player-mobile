@@ -25,10 +25,12 @@ Windows, macOS, and Linux desktop targets are not included.
 3. Each audio window ends at the current playback position, so captions
    describe audio that has just played instead of running ahead of the video.
    Windows are refreshed every two seconds during playback.
-4. New rolling-window results replace the yellow caption overlay, which shows
-   the most recent phrase and clears itself after several seconds of silence.
-   Seeking clears the previous text and resumes transcription at the new
-   timeline position.
+4. New rolling-window results update the caption bar. It follows the look of
+   the system caption overlay on Android phones (and Infinix/XOS devices): a
+   near-black rounded box with white, centred text. Two lines are shown, and a
+   tap or double tap expands the box to show the last phrases, as the system
+   box does. The bar clears after about six seconds of silence. Seeking clears
+   the previous text and resumes transcription at the new timeline position.
 5. Pausing playback pauses transcription and preserves the last caption.
    Resuming starts a new session. Completing playback, opening another file, or
    locking for the paywall stops recognition.
@@ -94,7 +96,10 @@ static server such as VS Code Live Server does not apply these headers, so the
 app reports an actionable error instead of remaining stuck on “Preparing.”
 Production hosting must also send `Cross-Origin-Opener-Policy: same-origin` and
 `Cross-Origin-Embedder-Policy: require-corp`; `web/_headers` provides these for
-hosts that support that file.
+hosts that support that file. To preview a release web build with those headers
+locally, run `flutter build web --release` and then `.\tool\serve_web.ps1`,
+which serves `build\web` on <http://localhost:8080/> without needing Node,
+Python, or administrator rights.
 
 The first caption session needs
 an internet connection to download the Whisper model. Android and iOS can
@@ -208,6 +213,32 @@ four Android signing secrets above plus `RELEASE_TOKEN`, a token with
 Set `version:` in `pubspec.yaml` before tagging so the Android version name and
 build number, and the iOS short version and bundle version, match the release
 tag.
+
+## When captions do not appear
+
+The caption bar reports what the pipeline is doing, so a silent video no longer
+looks identical to a broken setup:
+
+- `Preparing live captions…` and `Downloading caption model · N%` mean the
+  on-device model is still loading. The first session needs a connection for the
+  31 MiB download.
+- `Listening for speech…` means media audio is being read but no words have been
+  recognised yet. Music, silence, or a very quiet track can stay in this state.
+- A red banner above the caption bar carries the failure reason and a retry
+  action. The reason is included so a failed model download can be told apart
+  from an unsupported device or a media file without an audio track.
+- Web builds must be served with the COOP and COEP headers from
+  `web_dev_config.yaml` (development, applied by `flutter run`) or `web/_headers`
+  (hosting); `tool/serve_web.ps1` adds them to a local release build. Without
+  them the WebAssembly worker cannot start and the app says so instead of
+  staying on “Preparing”.
+- `flutter run` prints one line per transcription window:
+  `Caption window <start>ms+<length>ms (<samples> samples) -> "<text>"`.
+  `<silence>` means the decoder produced audio but Whisper heard no speech, and
+  a missing line means no audio was read for that window.
+
+Silent stretches and the end of an audio track are treated as silence rather
+than as decoder failures, so captioning keeps running through them.
 
 ## Caption limitations
 

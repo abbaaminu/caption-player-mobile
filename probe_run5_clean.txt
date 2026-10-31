@@ -1,0 +1,5 @@
+﻿Probing http://localhost:8126/probe.html with C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+Browser exited with 0
+--- probe log ---
+startingâ?▌
+

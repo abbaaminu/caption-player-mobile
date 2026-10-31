@@ -66,6 +66,14 @@ void main() {
           async.flushMicrotasks();
         }
 
+        // A short pause between sentences keeps the finished line on screen.
+        expect(results, isEmpty);
+
+        position = const Duration(seconds: 6);
+        clock = clock.add(const Duration(seconds: 2));
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+
         expect(results, ['']);
         expect(results, isNot(contains('[BLANK_AUDIO]')));
 

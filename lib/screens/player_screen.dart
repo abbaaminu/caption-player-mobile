@@ -1163,6 +1163,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  /// Status shown inside the caption bar until the first phrase arrives.
+  ///
+  /// Live Caption renders its box as soon as captioning starts, so a viewer can
+  /// see that the model is downloading or that speech is being awaited instead
+  /// of staring at a video that appears to have no captions at all.
+  String get _captionStageStatus {
+    if (_captionsText.isNotEmpty) {
+      return '';
+    }
+    if (_isPreparingCaptions) {
+      final progress = _captionModelProgress;
+      return progress == null
+          ? 'Preparing live captions…'
+          : 'Downloading caption model · $progress%';
+    }
+    if (_isTranscribing) {
+      return 'Listening for speech…';
+    }
+    return '';
+  }
+
+  /// Whether the caption bar belongs on screen.
+  bool get _showCaptionBar =>
+      _captionsText.isNotEmpty || _captionStageStatus.isNotEmpty;
+
   Widget _buildMediaArea() {
     final controller = _videoController;
     final value = controller?.value;
@@ -1261,12 +1286,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
           if (isReady &&
               !_showPaywall &&
               !_isLoadingMedia &&
-              _captionsText.isNotEmpty)
+              _showCaptionBar)
             Positioned(
-              left: 16,
-              right: 16,
-              bottom: 16,
-              child: Center(child: CaptionOverlay(text: _captionsText)),
+              left: 12,
+              right: 12,
+              bottom: 12,
+              child: CaptionOverlay(
+                text: _captionsText,
+                status: _captionStageStatus,
+              ),
             ),
         ],
       ),
