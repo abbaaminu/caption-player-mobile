@@ -14,6 +14,7 @@ class PlayerControls extends StatelessWidget {
     required this.hasMedia,
     required this.isPlaying,
     required this.isLoading,
+    this.loadingLabel = 'Opening…',
     required this.enabled,
     required this.onPickMedia,
     required this.onBack10,
@@ -30,6 +31,7 @@ class PlayerControls extends StatelessWidget {
   final bool hasMedia;
   final bool isPlaying;
   final bool isLoading;
+  final String loadingLabel;
   final bool enabled;
   final VoidCallback onPickMedia;
   final VoidCallback onBack10;
@@ -72,7 +74,7 @@ class PlayerControls extends StatelessWidget {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.folder_open_rounded),
-                  label: Text(isLoading ? 'Opening…' : 'Open File'),
+                  label: Text(isLoading ? loadingLabel : 'Open File'),
                 ),
                 TextButton.icon(
                   onPressed: canControlMedia ? onBack10 : null,

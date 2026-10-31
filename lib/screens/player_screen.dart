@@ -8,6 +8,7 @@ import 'package:video_player/video_player.dart';
 import '../config/app_config.dart';
 import '../services/activation_link_service.dart';
 import '../services/api_service.dart';
+import '../services/media_audio_source.dart';
 import '../services/media_picker_service.dart';
 import '../services/speech_service.dart';
 import '../services/storage_service.dart';
@@ -60,6 +61,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   StreamSubscription<String>? _activationLinkSubscription;
   Timer? _trialTimer;
   VideoPlayerController? _videoController;
+  MediaAudioSource? _mediaAudioSource;
 
   bool _isInitializing = true;
   String? _startupError;
@@ -75,6 +77,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isSavingTrial = false;
 
   bool _isLoadingMedia = false;
+  String _mediaLoadingStatus = 'Choose a media file…';
   bool _isAudioTrack = false;
   String? _mediaTitle;
   String? _playerError;
@@ -88,9 +91,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isPreparingCaptions = false;
   bool _showCaptionGuide = true;
   String _captionStatus = '';
+  int? _captionModelProgress;
   String _captionsText = '';
 
   double? _dragPositionMs;
+
+  /// Pauses media and captions when the app leaves the foreground.
+  late final AppLifecycleListener _appLifecycleListener;
 
   @override
   void initState() {
@@ -106,6 +113,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _videoControllerFactory =
         widget.videoControllerFactory ?? createVideoController;
     _licenseKeyController = TextEditingController();
+    _appLifecycleListener = AppLifecycleListener(onHide: _handleAppHidden);
 
     unawaited(_initializeApp());
     _startTrialTracking();
@@ -114,6 +122,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    _appLifecycleListener.dispose();
     _trialTimer?.cancel();
     unawaited(_activationLinkSubscription?.cancel());
     _videoController?.removeListener(_handleVideoChanged);
@@ -385,6 +394,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  /// Hidden apps must not keep playing audio or transcribing offscreen: the
+  /// viewer cannot see captions, and background playback would consume trial
+  /// time unnoticed.
+  void _handleAppHidden() {
+    final controller = _videoController;
+    if (controller == null || !controller.value.isPlaying) {
+      return;
+    }
+    unawaited(_pauseForBackground());
+  }
+
+  Future<void> _pauseForBackground() async {
+    try {
+      await _videoController?.pause();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Could not pause hidden playback: $error');
+      }
+    }
+    await _pauseCaptioning();
+  }
+
   Future<void> _lockForPaywall() async {
     await _pausePlaybackForPaywall();
     if (!mounted) {
@@ -486,8 +517,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return 'Free trial · $bounded min left';
   }
 
-  /// Web speech recognition only works in a secure context.
-  bool get _canUseMicrophone =>
+  /// WebAssembly captions require a secure context.
+  bool get _canUseWebCaptions =>
       !kIsWeb ||
       Uri.base.scheme == 'https' ||
       Uri.base.host == 'localhost' ||
@@ -497,9 +528,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_isPreparingCaptions || _showPaywall) {
       return;
     }
-    if (!_canUseMicrophone) {
+    if (!_canUseWebCaptions) {
       _setCaptionError(
-        'Live captions need HTTPS or localhost. Open this app over a secure '
+        'Web captions need HTTPS or localhost. Open this app over a secure '
         'connection, then retry captions.',
         canRetry: false,
       );
@@ -523,6 +554,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final available = await _speechService.initialize(
         onError: _handleCaptionError,
         onStatus: _handleSpeechStatus,
+        onProgress: _handleCaptionProgress,
       );
       if (!mounted) {
         return;
@@ -538,6 +570,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _captionsReady = true;
         _captionsEnabled = true;
         _showCaptionGuide = true;
+        _captionModelProgress = null;
         _playerError = null;
         _showCaptionRecoveryActions = false;
       });
@@ -586,11 +619,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       onResult: _handleCaptionText,
       onError: _handleCaptionError,
       onStatus: _handleSpeechStatus,
+      audioSource: _mediaAudioSource,
+      position: () => controller.value.position,
     );
   }
 
-  /// Stops the microphone while preserving the last caption line. Called when
-  /// playback pauses so captions resume with the video.
+  /// Pauses transcription while preserving the last caption line.
   Future<void> _pauseCaptioning() async {
     if (!_captionsEnabled) {
       return;
@@ -652,6 +686,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _captionStatus = SpeechService.statusMessage(status);
       if (status == SpeechStatus.listening) {
         _isTranscribing = true;
+        _captionModelProgress = null;
       } else if (status == SpeechStatus.paused) {
         _isTranscribing = false;
       }
@@ -674,8 +709,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _captionsEnabled = false;
       _isTranscribing = false;
       _captionStatus = '';
+      _captionModelProgress = null;
       _showCaptionGuide = false;
       _showCaptionRecoveryActions = canRetry;
+      _captionsText = '';
       _playerError = message;
     });
     unawaited(_speechService.stop());
@@ -698,30 +735,56 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     setState(() {
       _isLoadingMedia = true;
+      _mediaLoadingStatus = 'Choose a media file…';
       _playerError = null;
       _showCaptionRecoveryActions = false;
       _lastVideoError = null;
     });
 
     VideoPlayerController? newController;
+    var installed = false;
     try {
       final file = await _mediaPicker.pickMedia();
       if (file == null || !mounted) {
         return;
       }
+      setState(() => _mediaLoadingStatus = 'Preparing playback…');
       await _stopCaptioning();
       newController = await _videoControllerFactory(file);
-      await newController.initialize();
+      await newController.initialize().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw TimeoutException(
+          'Preparing the media file took longer than 30 seconds.',
+        ),
+      );
       if (!mounted) {
         await newController.dispose();
         return;
       }
+      final MediaAudioSource audioSource;
+      try {
+        audioSource = await createMediaAudioSource(file);
+      } catch (error) {
+        if (kDebugMode) {
+          debugPrint('Preparing the media audio track failed: $error');
+        }
+        throw UnsupportedError(
+          kIsWeb
+              ? "This file's audio could not be decoded for captions in the "
+                    'browser. Try a standard MP4, WebM, MP3, or M4A file.'
+              : "This file's audio track could not be read for captions. Try "
+                    'a standard MP4, WebM, MP3, or M4A file.',
+        );
+      }
+      setState(() => _mediaLoadingStatus = 'Starting playback…');
+      await _videoController?.pause();
       newController.addListener(_handleVideoChanged);
       await newController.play();
 
       final previousController = _videoController;
       setState(() {
         _videoController = newController;
+        _mediaAudioSource = audioSource;
         _isAudioTrack = isAudioMediaExtension(file.extension);
         _mediaTitle = file.name;
         _captionsText = '';
@@ -729,19 +792,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _wasCompleted = false;
         _lastVideoError = null;
       });
+      installed = true;
       previousController?.removeListener(_handleVideoChanged);
       await previousController?.dispose();
 
       if (_captionsEnabled && _captionsReady) {
         await _startCaptioning();
       } else {
-        await _enableCaptions();
+        unawaited(_enableCaptions());
       }
     } catch (error) {
       if (kDebugMode) {
         debugPrint('Opening media failed: $error');
       }
-      await newController?.dispose();
+      // Only release the controller that never reached the player; the one on
+      // screen must stay alive so a caption failure does not stop playback.
+      if (!installed) {
+        await newController?.dispose();
+      }
       if (!mounted) {
         return;
       }
@@ -763,7 +831,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (error is StateError) {
       return error.message;
     }
+    if (error is TimeoutException) {
+      return 'This file is taking too long to open. Try a smaller or standard '
+          'MP4, WebM, MP3, or M4A file.';
+    }
     return fallback;
+  }
+
+  void _handleCaptionProgress(int progress) {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _captionModelProgress = progress.clamp(0, 100).toInt());
+  }
+
+  String get _captionIndicatorLabel {
+    if (_isTranscribing) {
+      return 'LIVE';
+    }
+    if (_captionStatus ==
+        SpeechService.statusMessage(SpeechStatus.downloading)) {
+      final progress = _captionModelProgress;
+      return progress == null ? 'MODEL' : 'MODEL $progress%';
+    }
+    return 'PREPARING';
   }
 
   void _handleVideoChanged() {
@@ -876,6 +967,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     try {
       await controller.seekTo(clamped);
+      _speechService.resetTimeline();
+      if (mounted) {
+        setState(() => _captionsText = '');
+      }
     } catch (error) {
       if (kDebugMode) {
         debugPrint('Seek failed: $error');
@@ -933,7 +1028,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           child: ConstrainedBox(
                             constraints: const BoxConstraints(maxWidth: 760),
                             child: CaptionAudioGuide(
-                              isWeb: kIsWeb,
                               onDismiss: _dismissCaptionGuide,
                             ),
                           ),
@@ -947,6 +1041,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         hasMedia: hasMedia,
                         isPlaying: value?.isPlaying ?? false,
                         isLoading: _isLoadingMedia,
+                        loadingLabel: _mediaLoadingStatus,
                         enabled: !_showPaywall,
                         onPickMedia: () => unawaited(_pickMedia()),
                         onBack10: () =>
@@ -1050,7 +1145,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        _isTranscribing ? 'LIVE' : 'PREPARING',
+                        _captionIndicatorLabel,
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: AppTheme.accent,
                           fontWeight: FontWeight.w700,
@@ -1113,6 +1208,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       content = EmptyPlayerView(
         onChooseMedia: () => unawaited(_pickMedia()),
         isLoading: _isLoadingMedia,
+        loadingLabel: _mediaLoadingStatus,
       );
     }
 
@@ -1126,9 +1222,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
             Positioned.fill(
               child: ColoredBox(
                 color: Colors.black.withValues(alpha: 0.55),
-                child: const Center(
-                  child: CircularProgressIndicator(
-                    semanticsLabel: 'Opening media',
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(
+                        semanticsLabel: 'Opening media',
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        _mediaLoadingStatus,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ],
                   ),
                 ),
               ),

@@ -10,10 +10,12 @@ class EmptyPlayerView extends StatelessWidget {
     super.key,
     required this.onChooseMedia,
     this.isLoading = false,
+    this.loadingLabel = 'Opening…',
   });
 
   final VoidCallback onChooseMedia;
   final bool isLoading;
+  final String loadingLabel;
 
   String get _supportedFormats =>
       supportedMediaExtensions.map((ext) => ext.toUpperCase()).join(' · ');
@@ -66,7 +68,7 @@ class EmptyPlayerView extends StatelessWidget {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.video_library_outlined),
-                label: Text(isLoading ? 'Opening…' : 'Open media'),
+                label: Text(isLoading ? loadingLabel : 'Open media'),
               ),
               const SizedBox(height: 14),
               Text(

@@ -1,33 +1,18 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// Explains that live captions hear playback through the microphone and gives
-/// the two things a viewer can do to make them work well.
+/// Explains that local live captions use the media file's internal audio.
 ///
 /// Shown while captions are on until the viewer dismisses it.
 class CaptionAudioGuide extends StatelessWidget {
-  const CaptionAudioGuide({
-    super.key,
-    required this.onDismiss,
-    this.isWeb = kIsWeb,
-  });
+  const CaptionAudioGuide({super.key, required this.onDismiss});
 
   /// Called when the viewer closes the notice.
   final VoidCallback onDismiss;
 
-  /// Web captions use the browser microphone rather than the phone's.
-  final bool isWeb;
-
   @override
   Widget build(BuildContext context) {
-    final body = isWeb
-        ? 'Your browser listens through this device’s microphone. Keep the '
-              'video audible and let the browser use the microphone.'
-        : 'Captions listen through this device’s microphone. Keep the video '
-              'audible and set the phone near the speaker.';
-
     return Semantics(
       container: true,
       label: 'Live caption audio guidance',
@@ -52,7 +37,7 @@ class CaptionAudioGuide extends StatelessWidget {
                 ),
               ),
               child: const Icon(
-                Icons.hearing_rounded,
+                Icons.subtitles_rounded,
                 size: 20,
                 color: AppTheme.accent,
               ),
@@ -63,7 +48,7 @@ class CaptionAudioGuide extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Play audio for live captions',
+                    'Captions use internal audio',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
                       color: Colors.white,
                       fontWeight: FontWeight.w600,
@@ -71,7 +56,8 @@ class CaptionAudioGuide extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    body,
+                    'The media audio is transcribed on this device. No '
+                    'microphone access or audible room playback is needed.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Colors.white.withValues(alpha: 0.72),
                       height: 1.35,
@@ -83,12 +69,12 @@ class CaptionAudioGuide extends StatelessWidget {
                     runSpacing: 6,
                     children: [
                       _GuideHint(
-                        icon: Icons.volume_up_rounded,
-                        label: 'Keep playback audible',
+                        icon: Icons.audio_file_rounded,
+                        label: 'Audio stays on-device',
                       ),
                       _GuideHint(
-                        icon: Icons.record_voice_over_rounded,
-                        label: 'Speak clearly nearby',
+                        icon: Icons.mic_off_rounded,
+                        label: 'No microphone needed',
                       ),
                     ],
                   ),

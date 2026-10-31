@@ -1,0 +1,12 @@
+﻿Analyzing pcp...                                                
+
+   info - Use an initializing formal to assign a parameter to a field. Try using an initialing formal ('this._gate') to initialize the field - test\services\local_whisper_engine_test.dart:214:55 - prefer_initializing_formals
+
+flutter : 1 issue found. (ran in 132.9s)
+At line:1 char:42
++ cd C:\pcp; $env:PUB_CACHE='C:\pubcache'; flutter analyze 2>&1 | Out-F ...
++                                          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (1 issue found. (ran in 132.9s):String) [], RemoteE 
+   xception
+    + FullyQualifiedErrorId : NativeCommandError
+ 

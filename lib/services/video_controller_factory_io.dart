@@ -20,5 +20,8 @@ Future<VideoPlayerController> createVideoController(PlatformFile file) async {
   if (!await mediaFile.exists()) {
     throw StateError('The selected media file is no longer available.');
   }
-  return VideoPlayerController.file(mediaFile);
+  return VideoPlayerController.file(
+    mediaFile,
+    videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+  );
 }

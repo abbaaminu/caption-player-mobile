@@ -1,0 +1,47 @@
+﻿Running Gradle task 'assembleDebug'...                          
+flutter : 'C:\Users\ABBA' is not recognized as an internal or external command,
+At line:1 char:42
++ ...  $env:PUB_CACHE='C:\pubcache'; flutter build apk --debug 2>&1 | Out-F ...
++                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ('C:\Users\ABBA'...ternal command,:String) [], Remo 
+   teException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+operable program or batch file.
+
+Building native assets for package:objective_c failed.
+Compilation of hook returned with exit code: 1.
+To reproduce run:
+C:\Users\ABBA AMINU\Documents\flutter\bin\cache\dart-sdk\bin\dart compile kernel 
+'--packages=C:\Users\ABBA AMINU\premiumcaption_player\.dart_tool\package_config.json' 
+'--output=C:\Users\ABBA 
+AMINU\premiumcaption_player\.dart_tool\hooks_runner\objective_c\f952db4aa0\hook.dill' 
+'--depfile=C:\Users\ABBA 
+AMINU\premiumcaption_player\.dart_tool\hooks_runner\objective_c\f952db4aa0\hook.dill.d' 
+C:\pubcache\hosted\pub.dev\objective_c-9.4.1\hook\build.dart
+stderr:
+'C:\Users\ABBA' is not recognized as an internal or external command,
+operable program or batch file.
+
+stdout:
+
+
+Target dart_build failed: Error: Building native assets failed. See the logs for more details.
+
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileFlutterBuildDebug'.
+> Process 'command 'C:\Users\ABBA AMINU\Documents\flutter\bin\flutter.bat'' finished with 
+non-zero exit value 1
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to generate a Build Scan (Powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 10m 55s
+Running Gradle task 'assembleDebug'...                            712.6s
+Gradle task assembleDebug failed with exit code 1

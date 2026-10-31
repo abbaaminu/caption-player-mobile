@@ -1,5 +1,8 @@
+import 'dart:typed_data';
+
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:live_caption_player/services/media_audio_source.dart';
 import 'package:live_caption_player/services/speech_service.dart';
 
 void main() {
@@ -25,7 +28,7 @@ void main() {
       },
     );
 
-    test('maps a denied permission to actionable wording', () async {
+    test('maps inaccessible media audio to actionable wording', () async {
       final engine = _FakeEngine(initializationError: 'permission denied');
       final service = SpeechService(engine: engine);
       String? error;
@@ -35,10 +38,10 @@ void main() {
       );
 
       expect(available, isFalse);
-      expect(error, const SpeechPermissionException().userMessage);
+      expect(error, contains('selected media audio'));
     });
 
-    test('returns true once the platform recognizer is ready', () async {
+    test('returns true once the transcription engine is ready', () async {
       final engine = _FakeEngine();
       final service = SpeechService(engine: engine);
       final statuses = <SpeechStatus>[];
@@ -52,6 +55,24 @@ void main() {
       expect(service.isInitialized, isTrue);
       expect(engine.initializeCalls, 1);
       expect(statuses, [SpeechStatus.preparing]);
+    });
+
+    test('reports progress while preparing the on-device model', () async {
+      final engine = _FakeEngine(reportsModelProgress: true);
+      final service = SpeechService(engine: engine);
+      final statuses = <SpeechStatus>[];
+      final progress = <int>[];
+
+      final available = await service.initialize(
+        onError: (_) {},
+        onStatus: statuses.add,
+        onProgress: progress.add,
+      );
+
+      expect(available, isTrue);
+      expect(statuses, [SpeechStatus.preparing, SpeechStatus.downloading]);
+      expect(progress, [40]);
+      await service.dispose();
     });
   });
 
@@ -86,7 +107,7 @@ void main() {
       });
     });
 
-    test('keeps committed words when the recognizer renews its session', () {
+    test('keeps committed words when the engine renews its session', () {
       fakeAsync((async) {
         final engine = _FakeEngine();
         final service = SpeechService(
@@ -153,7 +174,7 @@ void main() {
       });
     });
 
-    test('pause stops the microphone and startListening resumes', () {
+    test('pause stops transcription and startListening resumes', () {
       fakeAsync((async) {
         final engine = _FakeEngine();
         final service = SpeechService(engine: engine);
@@ -250,13 +271,43 @@ void main() {
         expect(service.isActive, isFalse);
       });
     });
+
+    test('seek resets the visible caption and forwards the new timeline', () {
+      fakeAsync((async) {
+        final engine = _FakeEngine();
+        final service = SpeechService(engine: engine);
+        final results = <String>[];
+        const position = Duration(seconds: 42);
+
+        service.initialize(onError: (_) {});
+        async.flushMicrotasks();
+        service.startListening(
+          onResult: results.add,
+          onError: (_) {},
+          audioSource: _FakeMediaAudioSource(),
+          position: () => position,
+        );
+        async.flushMicrotasks();
+        engine.emit('caption before seek', false);
+
+        service.resetTimeline();
+
+        expect(results.last, isEmpty);
+        expect(engine.timelineResetCalls, 1);
+        expect(engine.audioSource, isA<_FakeMediaAudioSource>());
+        expect(engine.position?.call(), position);
+
+        service.dispose();
+        async.flushMicrotasks();
+      });
+    });
   });
 
   group('SpeechService wording', () {
-    test('maps recognizer errors to actionable messages', () {
+    test('maps engine errors to actionable messages', () {
       expect(
         userFriendlyError('permission denied', isWeb: false),
-        const SpeechPermissionException().userMessage,
+        contains('selected media audio'),
       );
       expect(
         userFriendlyError('network timeout'),
@@ -264,7 +315,7 @@ void main() {
       );
       expect(userFriendlyError('no speech detected'), contains('No speech'));
       expect(userFriendlyError('recognizer busy'), contains('busy'));
-      expect(userFriendlyError('audio error'), contains('microphone'));
+      expect(userFriendlyError('audio error'), contains('audio track'));
       expect(
         userFriendlyError('unknown failure'),
         const SpeechRecognitionException().userMessage,
@@ -275,6 +326,10 @@ void main() {
       expect(
         SpeechService.statusMessage(SpeechStatus.preparing),
         'Preparing live captions…',
+      );
+      expect(
+        SpeechService.statusMessage(SpeechStatus.downloading),
+        'Downloading caption model…',
       );
       expect(
         SpeechService.statusMessage(SpeechStatus.listening),
@@ -293,17 +348,22 @@ class _FakeEngine implements SpeechRecognitionEngine {
     this.supported = true,
     this.initializationError,
     this.listenError,
+    this.reportsModelProgress = false,
   });
 
   final bool supported;
   final String? initializationError;
   final Object? listenError;
+  final bool reportsModelProgress;
 
   int initializeCalls = 0;
   int listenCalls = 0;
   int stopCalls = 0;
   int cancelCalls = 0;
+  int timelineResetCalls = 0;
   bool listening = false;
+  MediaAudioSource? audioSource;
+  Duration Function()? position;
 
   void Function(String words, bool isFinal)? _onResult;
   void Function(SpeechEngineStatus status)? _onStatus;
@@ -318,6 +378,7 @@ class _FakeEngine implements SpeechRecognitionEngine {
   Future<bool> initialize({
     required void Function(String message, bool permanent) onError,
     required void Function(SpeechEngineStatus status) onStatus,
+    required void Function(int progress) onProgress,
   }) async {
     initializeCalls += 1;
     _onStatus = onStatus;
@@ -326,17 +387,24 @@ class _FakeEngine implements SpeechRecognitionEngine {
       onError(error, true);
       return false;
     }
+    if (reportsModelProgress) {
+      onStatus(SpeechEngineStatus.downloading);
+      onProgress(40);
+    }
     return true;
   }
 
   @override
   Future<void> listen({
     required void Function(String words, bool isFinal) onResult,
-    required Duration listenFor,
-    required Duration pauseFor,
+    required void Function(String message) onError,
+    required MediaAudioSource? audioSource,
+    required Duration Function() position,
   }) async {
     listenCalls += 1;
     _onResult = onResult;
+    this.audioSource = audioSource;
+    this.position = position;
     final error = listenError;
     if (error != null) {
       listening = false;
@@ -352,10 +420,18 @@ class _FakeEngine implements SpeechRecognitionEngine {
   }
 
   @override
+  void resetTimeline() {
+    timelineResetCalls += 1;
+  }
+
+  @override
   Future<void> cancel() async {
     cancelCalls += 1;
     listening = false;
   }
+
+  @override
+  Future<void> dispose() async {}
 
   void emit(String words, bool isFinal) {
     _onResult?.call(words, isFinal);
@@ -365,4 +441,12 @@ class _FakeEngine implements SpeechRecognitionEngine {
     listening = false;
     _onStatus?.call(SpeechEngineStatus.done);
   }
+}
+
+class _FakeMediaAudioSource implements MediaAudioSource {
+  @override
+  Future<Float32List> readSamplesAt(
+    Duration position,
+    Duration duration,
+  ) async => Float32List(0);
 }

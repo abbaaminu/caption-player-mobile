@@ -22,16 +22,22 @@ class CaptionOverlay extends StatelessWidget {
             ),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              child: Text(
-                text,
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Color(0xFFFFFF00),
-                  fontSize: 19,
-                  height: 1.35,
-                  fontWeight: FontWeight.w700,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 180),
+                switchInCurve: Curves.easeOut,
+                switchOutCurve: Curves.easeIn,
+                child: Text(
+                  text,
+                  key: ValueKey(text),
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFFFFFF00),
+                    fontSize: 19,
+                    height: 1.35,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ),

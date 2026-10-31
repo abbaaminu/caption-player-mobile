@@ -1,0 +1,76 @@
+﻿00:00 +0: loading C:/pcp/test/models/license_state_test.dart
+00:00 +0: C:/pcp/test/models/license_state_test.dart: LicenseState parses and trims a persisted license
+00:00 +1: C:/pcp/test/models/license_state_test.dart: LicenseState tolerates legacy or malformed values
+00:00 +2: C:/pcp/test/models/license_state_test.dart: LicenseState requires a key for a subscription to be valid
+00:00 +3: C:/pcp/test/models/license_state_test.dart: LicenseState round-trips through JSON
+00:00 +4: C:/pcp/test/models/license_state_test.dart: LicenseState copies individual fields
+00:00 +5: C:/pcp/test/models/license_state_test.dart: LicenseState implements value equality
+00:10 +6: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey posts the trimmed key to the production license endpoint
+00:10 +7: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey returns false for an invalid license
+00:10 +8: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey reports backend failures without treating them as an invalid key
+00:10 +9: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey does not call the server for an empty key
+00:10 +10: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey rejects an oversized key without calling the server
+00:10 +11: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey wraps connection failures with an actionable message
+00:10 +12: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey wraps timeouts with an actionable message
+00:10 +13: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey rejects malformed JSON responses
+00:10 +14: C:/pcp/test/services/api_service_test.dart: ApiService.verifyLicenseKey rejects responses without a boolean valid flag
+00:18 +15: C:/pcp/test/services/local_whisper_engine_test.dart: LocalWhisperRecognitionEngine captions the audio that has just played
+00:18 +16: C:/pcp/test/services/local_whisper_engine_test.dart: LocalWhisperRecognitionEngine drops Whisper silence cues and clears the caption line
+00:18 +17: C:/pcp/test/services/local_whisper_engine_test.dart: LocalWhisperRecognitionEngine moves the window to the seek target
+00:18 +18: C:/pcp/test/services/local_whisper_engine_test.dart: LocalWhisperRecognitionEngine discards a transcript produced for an abandoned playhead
+00:18 +19: C:/pcp/test/services/local_whisper_engine_test.dart: cleanTranscript removes silence annotations
+00:18 +20: C:/pcp/test/services/local_whisper_engine_test.dart: cleanTranscript keeps audio cues that describe the scene
+00:20 +21: C:/pcp/test/services/speech_service_test.dart: SpeechService.initialize reports an unsupported platform without starting the engine
+00:20 +22: C:/pcp/test/services/speech_service_test.dart: SpeechService.initialize maps inaccessible media audio to actionable wording
+00:20 +23: C:/pcp/test/services/speech_service_test.dart: SpeechService.initialize returns true once the transcription engine is ready
+00:20 +24: C:/pcp/test/services/speech_service_test.dart: SpeechService.initialize reports progress while preparing the on-device model
+00:20 +25: C:/pcp/test/services/speech_service_test.dart: SpeechService listening streams partial and final captions without duplicate updates
+00:20 +26: C:/pcp/test/services/speech_service_test.dart: SpeechService listening keeps committed words when the engine renews its session
+00:20 +27: C:/pcp/test/services/speech_service_test.dart: SpeechService listening resets the restart backoff after each successful session
+00:20 +28: C:/pcp/test/services/speech_service_test.dart: SpeechService listening pause stops transcription and startListening resumes
+00:20 +29: C:/pcp/test/services/speech_service_test.dart: SpeechService listening gives up after six consecutive listen failures
+00:20 +30: C:/pcp/test/services/speech_service_test.dart: SpeechService listening stop cancels the engine and ignores late results
+00:20 +31: C:/pcp/test/services/speech_service_test.dart: SpeechService listening seek resets the visible caption and forwards the new timeline
+00:20 +32: C:/pcp/test/services/speech_service_test.dart: SpeechService wording maps engine errors to actionable messages
+00:20 +33: C:/pcp/test/services/speech_service_test.dart: SpeechService wording describes each caption status for the player chip
+00:23 +34: C:/pcp/test/services/storage_service_test.dart: StorageService trial time returns zero when nothing is stored
+00:24 +35: C:/pcp/test/services/storage_service_test.dart: StorageService trial time loads a valid stored duration
+00:24 +36: C:/pcp/test/services/storage_service_test.dart: StorageService trial time treats corrupt or negative values as zero
+00:24 +37: C:/pcp/test/services/storage_service_test.dart: StorageService trial time clamps tampered values to the configured trial length
+00:24 +38: C:/pcp/test/services/storage_service_test.dart: StorageService trial time clamps progress before writing it
+00:24 +39: C:/pcp/test/services/storage_service_test.dart: StorageService license returns null when no license is stored
+00:24 +40: C:/pcp/test/services/storage_service_test.dart: StorageService license saves a trimmed key and reloads it as active
+00:24 +41: C:/pcp/test/services/storage_service_test.dart: StorageService license rejects an empty key
+00:24 +42: C:/pcp/test/services/storage_service_test.dart: StorageService license ignores malformed persisted JSON
+00:24 +43: C:/pcp/test/services/storage_service_test.dart: StorageService license does not trust an incomplete license payload
+00:24 +44: C:/pcp/test/services/storage_service_test.dart: StorageService license clears a stored license
+00:27 +45: C:/pcp/test/utils/activation_link_test.dart: parseActivationLink extracts a key from the custom scheme
+00:28 +46: C:/pcp/test/utils/activation_link_test.dart: parseActivationLink matches scheme and host case-insensitively and trims the key
+00:29 +47: C:/pcp/test/utils/activation_link_test.dart: parseActivationLink accepts a path-only activate link
+00:29 +48: C:/pcp/test/utils/activation_link_test.dart: parseActivationLink reports an activation link without a key
+00:29 +49: C:/pcp/test/utils/activation_link_test.dart: parseActivationLink ignores unrelated or malformed links
+00:32 +50: C:/pcp/test/utils/media_format_test.dart: media extensions normalizes case and a leading dot
+00:32 +51: C:/pcp/test/utils/media_format_test.dart: media extensions recognizes supported video and audio formats
+00:32 +52: C:/pcp/test/utils/media_format_test.dart: media extensions distinguishes audio formats
+00:32 +53: C:/pcp/test/utils/media_format_test.dart: media extensions maps extensions to MIME types used for web blobs
+00:32 +54: C:/pcp/test/utils/media_format_test.dart: media extensions every supported extension has a specific MIME type
+00:32 +55: C:/pcp/test/utils/media_format_test.dart: formatPlaybackDuration formats minutes and seconds
+00:32 +56: C:/pcp/test/utils/media_format_test.dart: formatPlaybackDuration formats hours
+00:32 +57: C:/pcp/test/utils/media_format_test.dart: formatPlaybackDuration clamps negative durations
+00:35 +58: C:/pcp/test/utils/web_origin_test.dart: isSecureWebOrigin holds on non-web platforms regardless of the URL
+00:35 +59: C:/pcp/test/utils/web_origin_test.dart: isSecureWebOrigin accepts HTTPS on the web
+00:35 +60: C:/pcp/test/utils/web_origin_test.dart: isSecureWebOrigin accepts localhost development origins over HTTP
+00:35 +61: C:/pcp/test/utils/web_origin_test.dart: isSecureWebOrigin rejects remote HTTP and non-HTTP origins
+00:38 +62: C:/pcp/test/widgets/caption_audio_guide_test.dart: explains internal-audio captions and can be dismissed
+01:03 +63: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup shows the paywall when the saved trial is exhausted
+01:05 +64: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup shows the paywall when the saved trial is exhausted
+01:07 +65: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup shows the remaining whole minutes of the trial
+01:08 +66: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup restores a cached license and revalidates it
+01:09 +67: C:/pcp/test/widgets/player_controls_test.dart: shows the current stage while opening media
+01:09 +68: C:/pcp/test/widgets/player_controls_test.dart: shows the current stage while opening media
+01:09 +69: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup recovers from a startup storage failure when retried
+01:10 +70: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen startup recovers from a startup storage failure when retried
+01:10 +71: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen activation activates the app with a key entered in the paywall
+01:11 +72: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen activation keeps the paywall open and reports an invalid key
+01:11 +73: C:/pcp/test/screens/player_screen_test.dart: PlayerScreen activation activates from a deep link with a key
+01:11 +74: All tests passed!

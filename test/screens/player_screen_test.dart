@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -10,9 +11,12 @@ import 'package:live_caption_player/config/app_config.dart';
 import 'package:live_caption_player/screens/player_screen.dart';
 import 'package:live_caption_player/services/activation_link_service.dart';
 import 'package:live_caption_player/services/api_service.dart';
+import 'package:live_caption_player/services/media_audio_source.dart';
 import 'package:live_caption_player/services/media_picker_service.dart';
+import 'package:live_caption_player/services/speech_service.dart';
 import 'package:live_caption_player/services/storage_service.dart';
 import 'package:live_caption_player/theme/app_theme.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   group('PlayerScreen startup', () {
@@ -198,6 +202,61 @@ void main() {
       );
     });
   });
+
+  group('PlayerScreen playback lifecycle', () {
+    testWidgets('pauses playback and captions when the app is hidden', (
+      tester,
+    ) async {
+      final controller = _FakeVideoController();
+      final engine = _FakeSpeechEngine();
+      final speechService = SpeechService(engine: engine);
+      addTearDown(speechService.dispose);
+
+      await _pumpPlayer(
+        tester,
+        store: _MemoryStore(),
+        client: _client('{"valid":true}'),
+        speechService: speechService,
+        mediaPicker: _FakeMediaPicker(file: _TestMediaFile('clip.mp4', 2048)),
+        videoControllerFactory: (_) async => controller,
+      );
+
+      await tester.tap(find.text('Open media'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(controller.value.isPlaying, isTrue);
+      expect(engine.listenCalls, 1);
+
+      await _sendAppLifecycleState(tester, AppLifecycleState.hidden);
+      await tester.pump();
+      await tester.pump();
+
+      expect(controller.pauseCalls, 1);
+      expect(controller.value.isPlaying, isFalse);
+      expect(engine.stopCalls, 1);
+
+      await _sendAppLifecycleState(tester, AppLifecycleState.resumed);
+      await tester.pump();
+
+      // Returning to the foreground must not resume playback on its own.
+      expect(controller.playCalls, 1);
+      expect(controller.value.isPlaying, isFalse);
+    });
+  });
+}
+
+Future<void> _sendAppLifecycleState(
+  WidgetTester tester,
+  AppLifecycleState state,
+) async {
+  // The binding synthesizes the intermediate transitions, so sending the
+  // target state is enough to reach it from any starting state.
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    SystemChannels.lifecycle.name,
+    const StringCodec().encodeMessage(state.toString()),
+    (_) {},
+  );
 }
 
 final String _trialEndedMessage =
@@ -208,6 +267,10 @@ Future<void> _pumpPlayer(
   required _MemoryStore store,
   required http.Client client,
   _FakeActivationLinks? links,
+  SpeechService? speechService,
+  MediaPickerService? mediaPicker,
+  Future<VideoPlayerController> Function(PlatformFile file)?
+  videoControllerFactory,
 }) async {
   tester.view.physicalSize = const Size(1200, 2000);
   tester.view.devicePixelRatio = 1;
@@ -228,7 +291,9 @@ Future<void> _pumpPlayer(
         storageService: StorageService(store: store),
         apiService: apiService,
         activationLinkSource: linkSource,
-        mediaPicker: _FakeMediaPicker(),
+        mediaPicker: mediaPicker ?? _FakeMediaPicker(),
+        speechService: speechService,
+        videoControllerFactory: videoControllerFactory,
       ),
     ),
   );
@@ -287,6 +352,126 @@ class _FakeActivationLinks implements ActivationLinkSource {
 }
 
 class _FakeMediaPicker implements MediaPickerService {
+  _FakeMediaPicker({this.file});
+
+  final PlatformFile? file;
+
   @override
-  Future<PlatformFile?> pickMedia() async => null;
+  Future<PlatformFile?> pickMedia() async => file;
+}
+
+/// A picked file that only exposes the metadata the player reads before a
+/// controller is created.
+base class _TestMediaFile extends PlatformFile {
+  _TestMediaFile(this.name, this.size);
+
+  @override
+  final String name;
+
+  final int size;
+
+  @override
+  Uri get uri => Uri.file('C:/media/$name');
+
+  @override
+  Never get xFile => throw UnsupportedError('Not needed in widget tests');
+
+  @override
+  int? lengthSync() => size;
+
+  @override
+  Future<int> length() async => size;
+
+  @override
+  Never readAsBytes() => throw UnsupportedError('Not needed in widget tests');
+
+  @override
+  Never readAsByteStream() =>
+      throw UnsupportedError('Not needed in widget tests');
+}
+
+/// A controller that plays without touching the video_player plugin.
+class _FakeVideoController extends VideoPlayerController {
+  _FakeVideoController()
+    : super.networkUrl(Uri.parse('https://example.com/clip.mp4'));
+
+  int playCalls = 0;
+  int pauseCalls = 0;
+
+  @override
+  Future<void> initialize() async {
+    value = value.copyWith(
+      duration: const Duration(seconds: 30),
+      isInitialized: true,
+    );
+  }
+
+  @override
+  Future<void> play() async {
+    playCalls += 1;
+    value = value.copyWith(isPlaying: true, isCompleted: false);
+  }
+
+  @override
+  Future<void> pause() async {
+    pauseCalls += 1;
+    value = value.copyWith(isPlaying: false);
+  }
+
+  @override
+  Future<void> seekTo(Duration position) async {
+    value = value.copyWith(position: position);
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    value = value.copyWith(volume: volume);
+  }
+}
+
+class _FakeSpeechEngine implements SpeechRecognitionEngine {
+  int listenCalls = 0;
+  int stopCalls = 0;
+  bool _listening = false;
+
+  @override
+  bool get isSupported => true;
+
+  @override
+  bool get isListening => _listening;
+
+  @override
+  Future<bool> initialize({
+    required void Function(String message, bool permanent) onError,
+    required void Function(SpeechEngineStatus status) onStatus,
+    required void Function(int progress) onProgress,
+  }) async => true;
+
+  @override
+  Future<void> listen({
+    required void Function(String words, bool isFinal) onResult,
+    required void Function(String message) onError,
+    required MediaAudioSource? audioSource,
+    required Duration Function() position,
+  }) async {
+    listenCalls += 1;
+    _listening = true;
+  }
+
+  @override
+  Future<void> stop() async {
+    stopCalls += 1;
+    _listening = false;
+  }
+
+  @override
+  Future<void> cancel() async {
+    _listening = false;
+  }
+
+  @override
+  void resetTimeline() {}
+
+  @override
+  Future<void> dispose() async {}
 }

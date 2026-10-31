@@ -1,48 +1,45 @@
 # Live Caption Player
 
 A Flutter media player for Android, iOS, and the web. Select a video or audio
-file, play it, and see live captions produced by the device's speech
-recognition. Captions listen to nearby playback through the microphone; the app
-does not record or store audio.
+file, play it, and see live captions transcribed locally by Whisper. Captions
+are generated directly from the selected file's audio track. Audio is not
+uploaded or captured from a microphone.
 
 ## Supported platforms
 
-- Android 7.0+ phones and tablets: playback and live captions through the
-  device speech recognizer
-- iPhone and iPad running iOS 14+: playback and live captions through iOS Speech
-- Modern web browsers with the SpeechRecognition API (typically Chrome or Edge):
-  playback and live captions when the app is served over HTTPS or localhost
+- Android 7.0+ 64-bit phones and tablets (arm64-v8a, x86_64): playback and
+  on-device Whisper captions. The Whisper native library has no 32-bit ARM
+  build, so the Android app is not offered to 32-bit-only devices.
+- iPhone and iPad running iOS 14+: playback and on-device Whisper captions
+- Modern browsers with WebAssembly support: playback and
+  on-device Whisper captions over HTTPS or localhost
 
 Windows, macOS, and Linux desktop targets are not included.
 
 ## How live captions work
 
 1. Opening a media file starts playback immediately.
-2. `speech_to_text` wraps Android's `SpeechRecognizer`, iOS Speech, and the
-   browser's `SpeechRecognition` API. The microphone picks up the audio played
-   through the device speaker, so playback must stay audible.
-3. While playback is running, captions listen in rolling sessions. Platform
-   recognizers end a session after a stretch of silence or their maximum
-   session length; the service renews the session automatically and keeps the
-   last caption instead of stopping.
-4. Partial results update the yellow caption overlay as words are recognized,
-   and a short rolling window keeps the newest phrases visible.
-5. Pausing playback pauses the microphone and preserves the last caption.
+2. The app extracts short PCM windows from the selected media's audio track
+   and transcribes them using a multilingual Whisper model on-device. No
+   microphone or room playback is involved.
+3. Each audio window ends at the current playback position, so captions
+   describe audio that has just played instead of running ahead of the video.
+   Windows are refreshed every two seconds during playback.
+4. New rolling-window results replace the yellow caption overlay, which shows
+   the most recent phrase and clears itself after several seconds of silence.
+   Seeking clears the previous text and resumes transcription at the new
+   timeline position.
+5. Pausing playback pauses transcription and preserves the last caption.
    Resuming starts a new session. Completing playback, opening another file, or
    locking for the paywall stops recognition.
-6. The first caption session requests microphone and speech-recognition
-   permission. Recognition may run on-device or through the platform provider's
-   service, depending on the device and installed languages.
+6. The first caption session downloads the 31 MiB quantized Whisper model.
+   Android and iOS cache the model for later sessions; web relies on normal
+   browser HTTP caching. Once loaded, audio is transcribed locally.
 
-Android declares `RECORD_AUDIO` and a `<queries>` entry for
-`android.speech.RecognitionService` so Android 11+ can find the recognizer. iOS
-declares `NSMicrophoneUsageDescription` and
-`NSSpeechRecognitionUsageDescription`. No audio is written to storage; only the
-recognized text is shown.
+The app does not request microphone permissions. Extracted PCM audio is held
+only long enough for local transcription and is never uploaded.
 
-Third-party components: `speech_to_text` is MIT-licensed. The recognition
-service itself is provided by the operating system or browser and is subject to
-that provider's terms.
+Third-party component: `flutter_whisper_ggml` is MIT-licensed.
 
 ## Trial and subscription settings
 
@@ -89,26 +86,41 @@ flutter pub get
 flutter run
 ```
 
-Use `flutter devices` to choose an Android or iOS device, or run the web build
-from a secure origin. Live captions work on Android, iOS, and browsers that
-expose the SpeechRecognition API.
+Use Flutter 3.44 or newer (Dart 3.12 or newer). Web captions require
+cross-origin isolation. The included `web_dev_config.yaml` configures the
+Flutter development server with the required COOP/COEP headers; run
+`flutter run -d web-server --web-port 8080` from the project root. A generic
+static server such as VS Code Live Server does not apply these headers, so the
+app reports an actionable error instead of remaining stuck on “Preparing.”
+Production hosting must also send `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`; `web/_headers` provides these for
+hosts that support that file.
 
-Android needs no extra setup. iOS permissions are declared in
-`ios/Runner/Info.plist`; iOS builds require macOS and Xcode.
+The first caption session needs
+an internet connection to download the Whisper model. Android and iOS can
+transcribe offline after the model is cached; web model reuse depends on browser
+HTTP caching. Use `flutter devices` to choose an Android or iOS device, or run
+the web build from a secure origin.
+
+Android needs no extra setup: the manifest requests internet access only, and
+files are opened through the system document picker rather than broad storage
+permissions. iOS declares no microphone or speech-recognition permissions
+either, because captions read the selected file's audio track. iOS builds
+require macOS and Xcode.
 
 Build web and Android release artifacts with:
 
 ```sh
-flutter build web --no-wasm-dry-run
+flutter build web
 flutter build apk --release
 ```
 
-Use `--no-wasm-dry-run` for web builds. The secure-storage web plugin uses
-JavaScript interop that Flutter's WebAssembly dry run does not support. In a
-web build, this app uses browser local storage for trial and license state
-instead of invoking the secure-storage plugin. Browser storage is scoped to
-the deployed origin and is not encrypted; users can clear it in browser
-settings.
+The WebAssembly dry run passes for this app, so `flutter build web` needs no
+extra flags; pass `--no-wasm-dry-run` only to skip that check for faster builds.
+Phone builds keep trial and license state in secure storage. A web build stores
+the same state in origin-scoped browser local storage instead of invoking the
+secure-storage plugin, so that storage is not encrypted and users can clear it
+in browser settings.
 
 iOS builds require macOS and Xcode. The release workflow packages an unsigned
 iOS IPA as `live-caption-player-ios-unsigned.ipa`. Sign it with an Apple
@@ -199,18 +211,20 @@ tag.
 
 ## Caption limitations
 
-- Captions depend on the device's speech-recognition service and installed
-  languages. Availability, accuracy, and supported languages vary by device,
-  OS version, and browser.
-- Captions listen through the microphone, so playback must be audible. Using
-  headphones prevents the recognizer from hearing the audio.
-- Background noise, music, overlapping speech, and low volume reduce accuracy.
-- Recognizers end sessions after silence or a platform time limit. The service
-  restarts automatically while playback continues, but a word at the boundary
-  can be missed.
-- Web captions need a browser with the SpeechRecognition API (typically Chrome
-  or Edge) and an HTTPS or localhost origin. Safari and Firefox do not offer
-  this API, and the app reports that captions are unavailable instead of
-  silently failing.
-- The web version loads the chosen video into browser memory, so very large
-  files may require substantial memory.
+- The first caption use downloads the multilingual Whisper model (about 31 MiB).
+  A connection is needed for the download; Android and iOS cache it locally.
+  Web reuse depends on browser HTTP caching. Audio transcription runs on-device
+  after the model is loaded, with accuracy and speed depending on device
+  performance.
+- Captions use the media file's audio track directly and work with muted
+  playback or headphones.
+- Music, overlapping speech, and low-volume source audio reduce accuracy.
+- Web captions need HTTPS or localhost and the
+  Whisper WebAssembly worker. Deploy the response headers in `web/_headers`
+  (`Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`) for the worker runtime to work.
+- The web version plays the browser file picker’s local object URL directly
+  instead of copying the entire file into a second in-memory buffer. The browser
+  and media decoder still use memory for playback, and Web Audio decodes the
+  source for caption extraction, so very large files may require substantial
+  memory. Media remains on the device; the app does not upload it.

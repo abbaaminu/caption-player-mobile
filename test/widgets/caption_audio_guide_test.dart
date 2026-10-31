@@ -4,7 +4,7 @@ import 'package:live_caption_player/theme/app_theme.dart';
 import 'package:live_caption_player/widgets/caption_audio_guide.dart';
 
 void main() {
-  testWidgets('explains why playback must stay audible and can be dismissed', (
+  testWidgets('explains internal-audio captions and can be dismissed', (
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
@@ -14,18 +14,15 @@ void main() {
       MaterialApp(
         theme: AppTheme.dark,
         home: Scaffold(
-          body: CaptionAudioGuide(
-            isWeb: false,
-            onDismiss: () => dismissed = true,
-          ),
+          body: CaptionAudioGuide(onDismiss: () => dismissed = true),
         ),
       ),
     );
 
-    expect(find.text('Play audio for live captions'), findsOneWidget);
-    expect(find.textContaining('device’s microphone'), findsOneWidget);
-    expect(find.text('Keep playback audible'), findsOneWidget);
-    expect(find.text('Speak clearly nearby'), findsOneWidget);
+    expect(find.text('Captions use internal audio'), findsOneWidget);
+    expect(find.textContaining('No microphone access'), findsOneWidget);
+    expect(find.text('Audio stays on-device'), findsOneWidget);
+    expect(find.text('No microphone needed'), findsOneWidget);
     expect(
       find.byWidgetPredicate(
         (widget) =>
@@ -42,15 +39,14 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('uses browser-specific guidance on the web', (tester) async {
+  testWidgets('does not require room playback for captioning', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.dark,
-        home: Scaffold(body: CaptionAudioGuide(isWeb: true, onDismiss: () {})),
+        home: Scaffold(body: CaptionAudioGuide(onDismiss: () {})),
       ),
     );
 
-    expect(find.textContaining('browser listens'), findsOneWidget);
-    expect(find.textContaining('device’s microphone'), findsOneWidget);
+    expect(find.textContaining('audible room playback'), findsOneWidget);
   });
 }

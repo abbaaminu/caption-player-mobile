@@ -32,6 +32,22 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // The on-device Whisper plugin (flutter_whisper_ggml) builds its
+        // native library for 64-bit ABIs only. Shipping the app for 32-bit
+        // ARM would install on devices that can never caption, so the store
+        // listing is limited to the architectures that are fully supported.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    packaging {
+        // Some transitive AARs still ship 32-bit ARM jniLibs. Leaving them in
+        // would make the app installable on 32-bit devices even though the
+        // Flutter engine and the Whisper library are 64-bit only.
+        jniLibs {
+            excludes += "lib/armeabi-v7a/**"
+        }
     }
 
     signingConfigs {
@@ -56,8 +72,8 @@ android {
                 } else {
                     signingConfigs.getByName("debug")
                 }
-            // Vosk reaches its native library through JNA. Keep these rules
-            // ready for builds that enable R8 shrinking.
+            // whisper.cpp is reached through dart:ffi; keep these rules ready
+            // for builds that enable R8 shrinking.
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
