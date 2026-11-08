@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tile_label">Live Caption</string>
+    <string name="channel_ongoing">Live captions running</string>
+    <string name="channel_alerts">Live caption alerts</string>
+    <string name="notification_title">Live captions are on</string>
+    <string name="notification_text">Captioning audio playing on this phone</string>
+    <string name="notification_stop">Stop</string>
+    <string name="alert_title">Live captions stopped</string>
+    <string name="alert_start_failed">Live captions could not start. Open the app and try again.</string>
+    <string name="alert_capture_failed">Android did not allow audio capture. Open the app and start captions again.</string>
+    <string name="alert_need_audio_permission">Allow the audio permission in the app to caption sound playing on this phone. The microphone is never recorded.</string>
+    <string name="alert_need_overlay_permission">Allow "Display over other apps" so captions can appear on top of other apps.</string>
+    <string name="alert_unsupported_android">System-wide captions need Android 10 or newer.</string>
+    <string name="status_preparing">Preparing live captions…</string>
+    <string name="overlay_stop">Stop captions</string>
+    <string name="overlay_open_app">Settings</string>
+</resources>
